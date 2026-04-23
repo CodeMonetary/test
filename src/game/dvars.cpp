@@ -178,7 +178,9 @@ namespace dvars
 
 	game::dvar_s* cg_fov_gun = nullptr;
 	game::dvar_s* cg_fov_tweaks = nullptr;
-	game::dvar_s* r_mirrorViewmodel = nullptr;
+	game::dvar_s* r_mirrorViewmodel_method = nullptr;
+	game::dvar_s* r_mirrorViewmodel_cullFix = nullptr;
+	game::dvar_s* r_mirrorViewmodel_log = nullptr;
 	game::dvar_s* bg_bobIdle = nullptr;
 	
 	// Debug Collision

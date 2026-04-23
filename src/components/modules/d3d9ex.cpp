@@ -329,15 +329,32 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetRenderState(D3DRENDERSTATETYPE State, DWORD Value)
 	{
-		// r_mirrorViewmodel: when the viewmodel projection is horizontally flipped
-		// (see _renderer::set_gunfov), screen-space winding order is reversed and all
-		// viewmodel triangles would be culled as back faces. Invert CULLMODE for the
-		// duration of the viewmodel scene so front faces stay visible.
-		// NONE stays NONE; CW<->CCW swap.
-		if (State == D3DRS_CULLMODE && _renderer::mirror_viewmodel_active)
+		// r_mirrorViewmodel: when the viewmodel projection is horizontally flipped,
+		// screen-space winding order is reversed. Invert CULLMODE while
+		// mirror_viewmodel_active so front faces stay visible. Gated by
+		// r_mirrorViewmodel_cullFix so we can A/B test whether cull swap is the problem.
+		if (State == D3DRS_CULLMODE)
 		{
-			if (Value == D3DCULL_CW) Value = D3DCULL_CCW;
-			else if (Value == D3DCULL_CCW) Value = D3DCULL_CW;
+			const int log_level = dvars::r_mirrorViewmodel_log
+				? dvars::r_mirrorViewmodel_log->current.integer : 0;
+			const bool cull_fix = dvars::r_mirrorViewmodel_cullFix
+				? dvars::r_mirrorViewmodel_cullFix->current.enabled : false;
+
+			const DWORD original_value = Value;
+			bool swapped = false;
+			if (cull_fix && _renderer::mirror_viewmodel_active)
+			{
+				if (Value == D3DCULL_CW)       { Value = D3DCULL_CCW; swapped = true; }
+				else if (Value == D3DCULL_CCW) { Value = D3DCULL_CW;  swapped = true; }
+			}
+
+			if (log_level >= 2)
+			{
+				game::Com_PrintMessage(0, utils::va(
+					"[mirror] CULLMODE: in=%u out=%u active=%d cullFix=%d swapped=%d\n",
+					original_value, Value, (int)_renderer::mirror_viewmodel_active,
+					(int)cull_fix, (int)swapped), 0);
+			}
 		}
 
 		return m_pIDirect3DDevice9->SetRenderState(State, Value);

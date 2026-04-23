@@ -2,10 +2,8 @@
 
 namespace components
 {
-	// r_mirrorViewmodel :: shared flag consumed by d3d9ex::SetRenderState to
-	// invert D3DRS_CULLMODE while the viewmodel is being drawn (projection is
-	// mirrored in set_gunfov, which reverses winding order on screen).
 	volatile bool _renderer::mirror_viewmodel_active = false;
+	static int s_mirror_log_frame_counter = 0;
 
 	/* ---------------------------------------------------------- */
 	/* ------------ create dynamic rendering buffers ------------ */
@@ -1041,23 +1039,56 @@ namespace components
 			memcpy(view_parms->projectionMatrix.m, proj_mtx, sizeof(game::GfxMatrix));
 		}
 
-		// r_mirrorViewmodel :: horizontally mirror the viewmodel (weapon + hands)
-		// while keeping the world and 2D/HUD unaffected.
-		// The hook at 0x5FAA05 inside R_SetViewParmsForScene is only reached for the
-		// viewmodel scene (same hook point cg_fov_gun relies on), so modifying the
-		// projection matrix here does not affect the world or HUD passes.
-		// Negating column 0 of the projection matrix flips the clip-space X for every
-		// viewmodel vertex, producing a mirrored image. This also reverses the screen
-		// winding order of the mesh; the cull mode is re-inverted by d3d9ex so front
-		// faces stay visible. See d3d9ex::SetRenderState + _renderer::mirror_viewmodel_active.
-		const bool want_mirror = dvars::r_mirrorViewmodel && dvars::r_mirrorViewmodel->current.enabled;
-		_renderer::mirror_viewmodel_active = want_mirror;
-		if (want_mirror)
+		// --- r_mirrorViewmodel --- multi-method mirror with logging ---
+		const int method = dvars::r_mirrorViewmodel_method ? dvars::r_mirrorViewmodel_method->current.integer : 0;
+		const int log_level = dvars::r_mirrorViewmodel_log ? dvars::r_mirrorViewmodel_log->current.integer : 0;
+
+		// Logging: print view_parms state (rate-limited: once per 60 calls)
+		if (log_level >= 1 && (s_mirror_log_frame_counter % 60 == 0))
+		{
+			game::Com_PrintMessage(0, utils::va(
+				"[mirror] SVP: depthHackNearClip=%.4f  zNear=%.4f  zFar=%.1f  "
+				"origin=(%.1f %.1f %.1f)  proj[0][0]=%.6f\n",
+				view_parms->depthHackNearClip, view_parms->zNear, view_parms->zFar,
+				view_parms->origin[0], view_parms->origin[1], view_parms->origin[2],
+				view_parms->projectionMatrix.m[0][0]), 0);
+		}
+		s_mirror_log_frame_counter++;
+
+		// Determine if this call is for the viewmodel scene
+		const bool is_viewmodel_dhnc = (view_parms->depthHackNearClip != 0.0f);
+		const bool is_viewmodel_znear = (view_parms->zNear > 0.0f && view_parms->zNear < 1.0f);
+
+		bool apply_mirror = false;
+		switch (method)
+		{
+		case 1: // projection flip, gated by depthHackNearClip != 0
+			apply_mirror = is_viewmodel_dhnc;
+			break;
+		case 2: // projection flip, gated by zNear < 1.0
+			apply_mirror = is_viewmodel_znear;
+			break;
+		case 3: // projection flip, ungated (mirrors everything, diagnostic only)
+			apply_mirror = true;
+			break;
+		default: // 0 = off
+			break;
+		}
+
+		_renderer::mirror_viewmodel_active = apply_mirror;
+		if (apply_mirror)
 		{
 			view_parms->projectionMatrix.m[0][0] = -view_parms->projectionMatrix.m[0][0];
 			view_parms->projectionMatrix.m[1][0] = -view_parms->projectionMatrix.m[1][0];
 			view_parms->projectionMatrix.m[2][0] = -view_parms->projectionMatrix.m[2][0];
 			view_parms->projectionMatrix.m[3][0] = -view_parms->projectionMatrix.m[3][0];
+
+			if (log_level >= 1)
+			{
+				game::Com_PrintMessage(0, utils::va(
+					"[mirror] APPLIED method=%d  dhnc=%.4f  zNear=%.4f\n",
+					method, view_parms->depthHackNearClip, view_parms->zNear), 0);
+			}
 		}
 	}
 	
@@ -1181,11 +1212,27 @@ namespace components
 			/* maxVal	*/ 160.0f,
 			/* flags	*/ game::dvar_flags::saved);
 
-		dvars::r_mirrorViewmodel = game::Dvar_RegisterBool(
-			/* name		*/ "r_mirrorViewmodel",
-			/* desc		*/ "Horizontally mirror the viewmodel (weapon + hands) without mirroring the world or HUD",
-			/* default	*/ false,
+		dvars::r_mirrorViewmodel_method = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_method",
+			/* desc		*/ "Mirror viewmodel: 0=off, 1=proj flip (depthHackNearClip gate), 2=proj flip (zNear gate), 3=proj flip ungated (debug)",
+			/* default	*/ 0,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 3,
 			/* flags	*/ game::dvar_flags::saved);
+
+		dvars::r_mirrorViewmodel_cullFix = game::Dvar_RegisterBool(
+			/* name		*/ "r_mirrorViewmodel_cullFix",
+			/* desc		*/ "Invert CW/CCW cull mode during mirrored viewmodel draws (prevents inside-out mesh)",
+			/* default	*/ true,
+			/* flags	*/ game::dvar_flags::saved);
+
+		dvars::r_mirrorViewmodel_log = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_log",
+			/* desc		*/ "Log mirror diagnostics: 0=off, 1=per-scene summary, 2=verbose (incl. cull state)",
+			/* default	*/ 0,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 2,
+			/* flags	*/ game::dvar_flags::none);
 
 		// increase fps cap to 125 for menus and loadscreen
 		utils::hook::set<BYTE>(0x500174 + 2, 8);

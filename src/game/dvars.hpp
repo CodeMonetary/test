@@ -184,7 +184,9 @@ namespace dvars
 
 	extern game::dvar_s* cg_fov_gun;
 	extern game::dvar_s* cg_fov_tweaks;
-	extern game::dvar_s* r_mirrorViewmodel;
+	extern game::dvar_s* r_mirrorViewmodel_method;
+	extern game::dvar_s* r_mirrorViewmodel_cullFix;
+	extern game::dvar_s* r_mirrorViewmodel_log;
 	extern game::dvar_s* bg_bobIdle;
 
 	// Debug collision
