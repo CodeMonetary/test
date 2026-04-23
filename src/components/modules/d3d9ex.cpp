@@ -111,6 +111,9 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion)
 	{
+		// r_mirrorViewmodel: clear the viewmodel flag at frame boundary so next
+		// frame's world pass isn't rendered with inverted culling.
+		_renderer::mirror_viewmodel_active = false;
 		return m_pIDirect3DDevice9->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
 	}
 
@@ -244,6 +247,9 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::BeginScene()
 	{
+		// r_mirrorViewmodel: belt-and-suspenders; ensure flag is clear at frame start
+		// so the world pass (first after BeginScene) renders with normal culling.
+		_renderer::mirror_viewmodel_active = false;
 		return m_pIDirect3DDevice9->BeginScene();
 	}
 
