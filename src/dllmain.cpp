@@ -61,7 +61,7 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved) {
         wf::config_load(exe_dir, &wf::g_cfg);
         if (wf::g_cfg.log) {
             wf::log_init(exe_dir);
-            wf::logf("=== cod4-worldflip v7 attached (mode=viewmodel-flip). dir=%s ===", exe_dir);
+            wf::logf("=== cod4-worldflip v8 attached (mode=viewmodel-flip, cached-vp). dir=%s ===", exe_dir);
             wf::logf("config: enabled=%d debug_banner=%d log=%d toggle_vk=0x%02x",
                      (int)wf::g_cfg.enabled,
                      (int)wf::g_cfg.debug_banner,

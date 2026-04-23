@@ -179,6 +179,14 @@ private:
     // Cullmode actually pushed to the device (possibly swapped if a flip is active)
     DWORD m_device_cullmode = D3DCULL_CCW;
 
+    // v8: cached VS constants for the main projection-like matrix.
+    // On ViewModel pass entry we upload a flipped copy; on exit we restore.
+    // m_vp_is_flipped_on_device tracks which version is currently on device.
+    float m_vp_cache[16] = {0};
+    UINT  m_vp_cache_reg = 0;
+    bool  m_vp_cache_valid = false;
+    bool  m_vp_is_flipped_on_device = false;
+
     // Stats (per second)
     uint64_t m_frame_count = 0;
     uint64_t m_draws_world = 0;

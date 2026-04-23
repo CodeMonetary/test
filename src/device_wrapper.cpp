@@ -387,11 +387,37 @@ HRESULT __stdcall DeviceWrap::SetViewport(CONST D3DVIEWPORT9* pViewport) {
         // via ZENABLE=FALSE or via an orthographic projection detection,
         // because switching RTs for UI does not toggle the viewport back.
         const float range = pViewport->MaxZ - pViewport->MinZ;
+        const PassType old_pass = m_pass;
         if (range < 0.9f) {
             m_pass = PassType::ViewModel;
         } else {
             if (m_pass == PassType::ViewModel) {
                 m_pass = PassType::World;
+            }
+        }
+
+        // v8: CoD4 doesn't re-upload the projection/VP matrix when entering
+        // the viewmodel pass - it just shrinks the depth range and reuses
+        // the world VP. So we manually push a flipped copy on entry, and
+        // restore the cached (unflipped) copy on exit.  This is what
+        // actually mirrors the weapon+hands geometry.
+        if (m_runtime_enabled && m_vp_cache_valid) {
+            if (m_pass == PassType::ViewModel && old_pass != PassType::ViewModel) {
+                // Entering VM -> push flipped VP.
+                if (!m_vp_is_flipped_on_device) {
+                    float flipped[16];
+                    std::memcpy(flipped, m_vp_cache, sizeof(flipped));
+                    flip_column0(flipped);
+                    m_real->SetVertexShaderConstantF(m_vp_cache_reg, flipped, 4);
+                    m_vp_is_flipped_on_device = true;
+                    ++m_total_flips;
+                }
+            } else if (old_pass == PassType::ViewModel && m_pass != PassType::ViewModel) {
+                // Leaving VM -> restore unflipped VP.
+                if (m_vp_is_flipped_on_device) {
+                    m_real->SetVertexShaderConstantF(m_vp_cache_reg, m_vp_cache, 4);
+                    m_vp_is_flipped_on_device = false;
+                }
             }
         }
     }
@@ -401,10 +427,10 @@ HRESULT __stdcall DeviceWrap::SetViewport(CONST D3DVIEWPORT9* pViewport) {
 HRESULT __stdcall DeviceWrap::SetRenderState(D3DRENDERSTATETYPE state, DWORD value) {
     if (state == D3DRS_CULLMODE) {
         m_engine_cullmode = value;
-        // v7: we flip only the ViewModel pass (weapon+hands). Everything
-        // else (world, HUD, post-process) is left untouched, so tonemap,
-        // fog and colour grading remain intact.
-        if (m_runtime_enabled && m_pass == PassType::ViewModel) {
+        // v8: swap cullmode only when the VP currently on device is actually
+        // flipped (not just when we're in ViewModel pass).  This keeps
+        // culling correct when CoD4 re-uses the unflipped world VP.
+        if (m_vp_is_flipped_on_device) {
             DWORD swapped = value;
             if (value == D3DCULL_CW)      swapped = D3DCULL_CCW;
             else if (value == D3DCULL_CCW) swapped = D3DCULL_CW;
@@ -430,18 +456,31 @@ HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
 
     const UINT total_floats = Vector4fCount * 4;
 
-    // Phase 1: classify. Inspect uploaded matrices for a perspective
-    // projection shape (which promotes "unknown" to World). We do NOT use
-    // an orthographic-matrix detector here: identity and pure-translation
-    // matrices also satisfy the ortho signature and would incorrectly
-    // drop us into HUD2D mid-frame.  HUD2D is detected reliably via
-    // SetRenderState(ZENABLE=FALSE) instead.
+    // Phase 1: classify and cache.  When a matrix with a projection-like
+    // shape passes through, cache an UNFLIPPED copy - we need it later to
+    // restore device state when leaving the ViewModel pass (CoD4 does not
+    // re-upload the VP for the VM sub-pass, it simply shrinks the depth
+    // range, so we have to mirror the cached copy ourselves).
     for (UINT base = 0; base + 16 <= total_floats; base += 4) {
         if ((base & 15) != 0) continue;
         const float* sub = pConstantData + base;
-        if (looks_like_pure_projection(sub)) {
+        const bool proj = looks_like_pure_projection(sub);
+        const bool vp   = looks_like_view_projection(sub);
+        if (proj) {
             if (m_pass != PassType::HUD2D && m_pass != PassType::ViewModel) {
                 m_pass = PassType::World;
+            }
+        }
+        if (proj || vp) {
+            const UINT reg = StartRegister + base / 4;
+            std::memcpy(m_vp_cache, sub, sizeof(m_vp_cache));
+            m_vp_cache_reg   = reg;
+            m_vp_cache_valid = true;
+            // An engine-driven upload during a non-VM pass always leaves
+            // the device in the unflipped state (the data the engine
+            // asked for is on the device).
+            if (m_pass != PassType::ViewModel) {
+                m_vp_is_flipped_on_device = false;
             }
         }
     }
@@ -450,8 +489,10 @@ HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
         return m_real->SetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount);
     }
 
-    // Phase 2: flip column 0 of matrices that look like projection during
-    // world pass.  Mutate into a local buffer.
+    // Phase 2: if we happen to be on the VM pass AND the engine IS re-
+    // uploading a projection-shaped matrix (rare but possible - some CoD4
+    // shaders rebind constants), flip on the fly in a local buffer before
+    // the upload reaches the device.
     bool any_flipped = false;
     float tmp_stack[256];
     float* mutated = nullptr;
@@ -460,8 +501,6 @@ HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
         if ((base & 15) != 0) continue;
         const float* sub = pConstantData + base;
 
-        // v7: flip only on the ViewModel pass so weapon+hands are mirrored
-        // and the rest of the scene stays untouched.
         if (m_pass != PassType::ViewModel) continue;
 
         bool want = false;
@@ -482,6 +521,7 @@ HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
         }
         flip_column0(mutated + base);
         any_flipped = true;
+        m_vp_is_flipped_on_device = true;
         ++m_total_flips;
     }
 
@@ -495,9 +535,12 @@ HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
 }
 
 bool DeviceWrap::pre_draw() {
-    // On every draw, ensure the cullmode on the device matches whether
-    // we are in a flipped viewmodel pass or not.
-    const bool active = (m_runtime_enabled && m_pass == PassType::ViewModel);
+    // v8: On every draw, ensure the cullmode on the device matches the
+    // current "is the VP flipped?" state - not the pass type.  When the VP
+    // was NOT re-uploaded for this pass (typical CoD4 VM pass) and we
+    // haven't injected a flipped copy yet, cullmode must stay unswapped
+    // or we render inside-out back-faces.
+    const bool active = (m_runtime_enabled && m_vp_is_flipped_on_device);
     DWORD wanted = m_engine_cullmode;
     if (active) {
         if (m_engine_cullmode == D3DCULL_CW)      wanted = D3DCULL_CCW;
