@@ -194,9 +194,25 @@ private:
     uint64_t m_draws_hud   = 0;
     uint64_t m_last_stats_ticks = 0;
 
-    // Runtime toggle (hotkey)
-    bool m_runtime_enabled = true;  // seeded from config.enabled at device creation
+    // Runtime toggle (hotkey).  v9: F11 now cycles through diagnostic
+    // flip modes, 0..kModeCount-1.
+    //   0 = OFF                 (no flips; logs first VS uploads on VM pass)
+    //   1 = cached-VP           (v8 behaviour: cache world VP, manual flip
+    //                            on SetViewport shrunk, Phase2 flips on VM)
+    //   2 = phase2 only         (no SetViewport trickery; just flip any
+    //                            VP-shaped upload that arrives during VM)
+    //   3 = all-4x4 on VM       (flip EVERY 4x4-looking block during VM)
+    //   4 = reg0 only on VM     (flip uploads targeting register 0 during
+    //                            VM, regardless of shape)
+    //   5 = mode1 + reg=4 too   (like mode 1, but also manually push a
+    //                            flipped copy at register 4 on VM enter)
+    static constexpr int kModeCount = 6;
+    int  m_flip_mode = 1;  // seeded below in ctor
+    bool m_runtime_enabled = true;  // (flip_mode != 0); kept for log compat
     bool m_last_key_down = false;
+
+    // Diagnostic: how many VM-pass VS-uploads we've already dumped.
+    int m_diag_vm_upload = 0;
 
     // Diagnostic "first-N-call" counters.
     int m_diag_qi = 0;

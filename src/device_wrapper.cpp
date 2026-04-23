@@ -106,10 +106,13 @@ static void flip_column0(float* m /*4x4 row-major*/) {
 
 DeviceWrap::DeviceWrap(IDirect3DDevice9* real, D3D9Wrap* parent)
     : m_real(real), m_parent(parent) {
-    m_runtime_enabled = g_cfg.enabled;
-    logf("DeviceWrap: ctor this=%p real=%p parent=%p, flip enabled=%d, toggle vk=0x%02x",
+    m_flip_mode = g_cfg.enabled ? 1 : 0;
+    m_runtime_enabled = (m_flip_mode != 0);
+    logf("DeviceWrap: ctor this=%p real=%p parent=%p, flip_mode=%d, toggle vk=0x%02x",
          (void*)this, (void*)real, (void*)parent,
-         (int)m_runtime_enabled, g_cfg.toggle_vk);
+         m_flip_mode, g_cfg.toggle_vk);
+    logf("  F11 cycles modes 0..5:"
+         " 0=off+log 1=cached-vp(v8) 2=phase2-only 3=all-4x4-vm 4=reg0-vm 5=v8+reg4");
 }
 
 // {B18B10CE-2649-405A-870F-95F777D4313A} - IID_IDirect3DDevice9Ex
@@ -336,8 +339,18 @@ void DeviceWrap::refresh_hotkey() {
     const SHORT s = GetAsyncKeyState(g_cfg.toggle_vk);
     const bool down = (s & 0x8000) != 0;
     if (down && !m_last_key_down) {
-        m_runtime_enabled = !m_runtime_enabled;
-        logf("hotkey: runtime_enabled -> %d", (int)m_runtime_enabled);
+        m_flip_mode = (m_flip_mode + 1) % kModeCount;
+        m_runtime_enabled = (m_flip_mode != 0);
+        // Leaving an "active" mode - restore any flipped state on device.
+        if (m_vp_is_flipped_on_device && m_vp_cache_valid) {
+            m_real->SetVertexShaderConstantF(m_vp_cache_reg, m_vp_cache, 4);
+            m_vp_is_flipped_on_device = false;
+        }
+        static const char* names[kModeCount] = {
+            "off+log", "cached-vp(v8)", "phase2-only", "all-4x4-vm",
+            "reg0-vm", "v8+reg4",
+        };
+        logf("hotkey: flip_mode -> %d (%s)", m_flip_mode, names[m_flip_mode]);
     }
     m_last_key_down = down;
 }
@@ -346,13 +359,13 @@ void DeviceWrap::log_stats() {
     const uint64_t now = GetTickCount();
     if (m_last_stats_ticks == 0) m_last_stats_ticks = now;
     if (now - m_last_stats_ticks >= 2000) {
-        logf("stats: frames=%llu world_draws=%llu vm_draws=%llu hud_draws=%llu flips=%llu (enabled=%d)",
+        logf("stats: frames=%llu world_draws=%llu vm_draws=%llu hud_draws=%llu flips=%llu (mode=%d)",
              (unsigned long long)m_frame_count,
              (unsigned long long)m_draws_world,
              (unsigned long long)m_draws_vm,
              (unsigned long long)m_draws_hud,
              (unsigned long long)m_total_flips,
-             (int)m_runtime_enabled);
+             m_flip_mode);
         m_draws_world = m_draws_vm = m_draws_hud = 0;
         m_last_stats_ticks = now;
     }
@@ -396,14 +409,11 @@ HRESULT __stdcall DeviceWrap::SetViewport(CONST D3DVIEWPORT9* pViewport) {
             }
         }
 
-        // v8: CoD4 doesn't re-upload the projection/VP matrix when entering
-        // the viewmodel pass - it just shrinks the depth range and reuses
-        // the world VP. So we manually push a flipped copy on entry, and
-        // restore the cached (unflipped) copy on exit.  This is what
-        // actually mirrors the weapon+hands geometry.
-        if (m_runtime_enabled && m_vp_cache_valid) {
+        // v9: SetViewport-anchored manual VP flip only applies to modes
+        // 1 and 5.  Other modes rely on Phase 2 / SetVSConstF interception.
+        const bool do_viewport_flip = (m_flip_mode == 1 || m_flip_mode == 5);
+        if (do_viewport_flip && m_vp_cache_valid) {
             if (m_pass == PassType::ViewModel && old_pass != PassType::ViewModel) {
-                // Entering VM -> push flipped VP.
                 if (!m_vp_is_flipped_on_device) {
                     float flipped[16];
                     std::memcpy(flipped, m_vp_cache, sizeof(flipped));
@@ -412,8 +422,18 @@ HRESULT __stdcall DeviceWrap::SetViewport(CONST D3DVIEWPORT9* pViewport) {
                     m_vp_is_flipped_on_device = true;
                     ++m_total_flips;
                 }
+                if (m_flip_mode == 5) {
+                    // Mode 5: also push a flipped VP at register 4 in case
+                    // the VM shader reads projection there.
+                    if (m_vp_cache_reg != 4) {
+                        float flipped[16];
+                        std::memcpy(flipped, m_vp_cache, sizeof(flipped));
+                        flip_column0(flipped);
+                        m_real->SetVertexShaderConstantF(4, flipped, 4);
+                        ++m_total_flips;
+                    }
+                }
             } else if (old_pass == PassType::ViewModel && m_pass != PassType::ViewModel) {
-                // Leaving VM -> restore unflipped VP.
                 if (m_vp_is_flipped_on_device) {
                     m_real->SetVertexShaderConstantF(m_vp_cache_reg, m_vp_cache, 4);
                     m_vp_is_flipped_on_device = false;
@@ -456,11 +476,8 @@ HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
 
     const UINT total_floats = Vector4fCount * 4;
 
-    // Phase 1: classify and cache.  When a matrix with a projection-like
-    // shape passes through, cache an UNFLIPPED copy - we need it later to
-    // restore device state when leaving the ViewModel pass (CoD4 does not
-    // re-upload the VP for the VM sub-pass, it simply shrinks the depth
-    // range, so we have to mirror the cached copy ourselves).
+    // Phase 1: classify and cache (only caches non-VM uploads so the cache
+    // keeps the actual world VP for later restore).
     for (UINT base = 0; base + 16 <= total_floats; base += 4) {
         if ((base & 15) != 0) continue;
         const float* sub = pConstantData + base;
@@ -471,58 +488,84 @@ HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
                 m_pass = PassType::World;
             }
         }
-        if (proj || vp) {
+        if ((proj || vp) && m_pass != PassType::ViewModel) {
             const UINT reg = StartRegister + base / 4;
             std::memcpy(m_vp_cache, sub, sizeof(m_vp_cache));
             m_vp_cache_reg   = reg;
             m_vp_cache_valid = true;
-            // An engine-driven upload during a non-VM pass always leaves
-            // the device in the unflipped state (the data the engine
-            // asked for is on the device).
-            if (m_pass != PassType::ViewModel) {
-                m_vp_is_flipped_on_device = false;
-            }
+            m_vp_is_flipped_on_device = false;
         }
     }
 
-    if (!m_runtime_enabled) {
+    // Diagnostic: on ViewModel pass, dump the first 30 uploads we see,
+    // irrespective of shape/mode, so we can see exactly what CoD4 binds
+    // for the weapon+hands shaders.
+    if (m_pass == PassType::ViewModel && m_diag_vm_upload < 30) {
+        for (UINT base = 0; base + 16 <= total_floats && m_diag_vm_upload < 30; base += 4) {
+            if ((base & 15) != 0) continue;
+            const float* s = pConstantData + base;
+            const UINT reg = StartRegister + base / 4;
+            ++m_diag_vm_upload;
+            const bool proj = looks_like_pure_projection(s);
+            const bool vp   = looks_like_view_projection(s);
+            logf("vm_upload #%d reg=%u count=%u proj=%d vp=%d "
+                 "r0=[%.3f %.3f %.3f %.3f] r1=[%.3f %.3f %.3f %.3f] "
+                 "r2=[%.3f %.3f %.3f %.3f] r3=[%.3f %.3f %.3f %.3f]",
+                 m_diag_vm_upload, reg, Vector4fCount,
+                 (int)proj, (int)vp,
+                 s[0], s[1], s[2], s[3],
+                 s[4], s[5], s[6], s[7],
+                 s[8], s[9], s[10], s[11],
+                 s[12], s[13], s[14], s[15]);
+        }
+    }
+
+    if (m_flip_mode == 0) {
         return m_real->SetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount);
     }
 
-    // Phase 2: if we happen to be on the VM pass AND the engine IS re-
-    // uploading a projection-shaped matrix (rare but possible - some CoD4
-    // shaders rebind constants), flip on the fly in a local buffer before
-    // the upload reaches the device.
+    // Phase 2: mode-dependent flip of sub-matrices during VM pass.
     bool any_flipped = false;
     float tmp_stack[256];
     float* mutated = nullptr;
 
-    for (UINT base = 0; base + 16 <= total_floats; base += 4) {
-        if ((base & 15) != 0) continue;
-        const float* sub = pConstantData + base;
+    if (m_pass == PassType::ViewModel) {
+        for (UINT base = 0; base + 16 <= total_floats; base += 4) {
+            if ((base & 15) != 0) continue;
+            const float* sub = pConstantData + base;
+            const UINT  reg  = StartRegister + base / 4;
 
-        if (m_pass != PassType::ViewModel) continue;
-
-        bool want = false;
-        if (looks_like_pure_projection(sub)) {
-            want = true;
-        } else if (looks_like_view_projection(sub)) {
-            want = true;
-        }
-        if (!want) continue;
-
-        if (!mutated) {
-            if (total_floats <= sizeof(tmp_stack) / sizeof(tmp_stack[0])) {
-                mutated = tmp_stack;
-            } else {
-                mutated = new float[total_floats];
+            bool want = false;
+            switch (m_flip_mode) {
+                case 1: // v8: vp-like
+                case 2: // phase2 only: vp-like
+                case 5: // v8+reg4: still vp-like in phase2
+                    want = looks_like_pure_projection(sub)
+                        || looks_like_view_projection(sub);
+                    break;
+                case 3: // all 4x4 blocks (indiscriminate)
+                    want = true;
+                    break;
+                case 4: // reg=0 only
+                    want = (reg == 0);
+                    break;
+                default: break;
             }
-            std::memcpy(mutated, pConstantData, total_floats * sizeof(float));
+            if (!want) continue;
+
+            if (!mutated) {
+                if (total_floats <= sizeof(tmp_stack) / sizeof(tmp_stack[0])) {
+                    mutated = tmp_stack;
+                } else {
+                    mutated = new float[total_floats];
+                }
+                std::memcpy(mutated, pConstantData, total_floats * sizeof(float));
+            }
+            flip_column0(mutated + base);
+            any_flipped = true;
+            m_vp_is_flipped_on_device = true;
+            ++m_total_flips;
         }
-        flip_column0(mutated + base);
-        any_flipped = true;
-        m_vp_is_flipped_on_device = true;
-        ++m_total_flips;
     }
 
     HRESULT hr = m_real->SetVertexShaderConstantF(
@@ -535,12 +578,9 @@ HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
 }
 
 bool DeviceWrap::pre_draw() {
-    // v8: On every draw, ensure the cullmode on the device matches the
-    // current "is the VP flipped?" state - not the pass type.  When the VP
-    // was NOT re-uploaded for this pass (typical CoD4 VM pass) and we
-    // haven't injected a flipped copy yet, cullmode must stay unswapped
-    // or we render inside-out back-faces.
-    const bool active = (m_runtime_enabled && m_vp_is_flipped_on_device);
+    // v9: cullmode swap follows "VP currently flipped on device" flag,
+    // across any mode.
+    const bool active = (m_flip_mode != 0 && m_vp_is_flipped_on_device);
     DWORD wanted = m_engine_cullmode;
     if (active) {
         if (m_engine_cullmode == D3DCULL_CW)      wanted = D3DCULL_CCW;
