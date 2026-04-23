@@ -206,6 +206,8 @@ private:
     int m_diag_setrt = 0;
     int m_diag_clear = 0;
     int m_diag_beginscene = 0;
+    int m_diag_flips_logged = 0;
+    uint64_t m_total_flips = 0;
 };
 
 } // namespace wf

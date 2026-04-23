@@ -235,6 +235,12 @@ HRESULT __stdcall DeviceWrap::BeginScene() {
         ++m_diag_beginscene;
         logf("DeviceWrap::BeginScene #%d this=%p", m_diag_beginscene, (void*)this);
     }
+    // Frame-boundary bookkeeping (IW3 presents via swapchain, so Present is
+    // unreliable as the frame hook). BeginScene is called every frame.
+    refresh_hotkey();
+    ++m_frame_count;
+    log_stats();
+    m_pass = PassType::Unknown;
     return m_real->BeginScene();
 }
 FWD(HRESULT, EndScene, (), ())
@@ -336,11 +342,12 @@ void DeviceWrap::log_stats() {
     const uint64_t now = GetTickCount();
     if (m_last_stats_ticks == 0) m_last_stats_ticks = now;
     if (now - m_last_stats_ticks >= 2000) {
-        logf("stats: frames=%llu world_draws=%llu vm_draws=%llu hud_draws=%llu (enabled=%d)",
+        logf("stats: frames=%llu world_draws=%llu vm_draws=%llu hud_draws=%llu flips=%llu (enabled=%d)",
              (unsigned long long)m_frame_count,
              (unsigned long long)m_draws_world,
              (unsigned long long)m_draws_vm,
              (unsigned long long)m_draws_hud,
+             (unsigned long long)m_total_flips,
              (int)m_runtime_enabled);
         m_draws_world = m_draws_vm = m_draws_hud = 0;
         m_last_stats_ticks = now;
@@ -352,11 +359,8 @@ HRESULT __stdcall DeviceWrap::Present(CONST RECT* a, CONST RECT* b, HWND w, CONS
         ++m_diag_present;
         logf("DeviceWrap::Present #%d this=%p", m_diag_present, (void*)this);
     }
-    refresh_hotkey();
-    ++m_frame_count;
-    log_stats();
-    // Next frame restarts pass tracking.
-    m_pass = PassType::Unknown;
+    // NOTE: frame-boundary bookkeeping lives in BeginScene now, because CoD4
+    // presents via IDirect3DSwapChain9 and this method is rarely hit.
     return m_real->Present(a, b, w, r);
 }
 
@@ -405,11 +409,16 @@ HRESULT __stdcall DeviceWrap::SetRenderState(D3DRENDERSTATETYPE state, DWORD val
 
 HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
         UINT StartRegister, CONST float* pConstantData, UINT Vector4fCount) {
-    if (m_diag_setvsconstf < 5 && pConstantData && Vector4fCount >= 4) {
+    if (m_diag_setvsconstf < 20 && pConstantData && Vector4fCount >= 4) {
         ++m_diag_setvsconstf;
-        logf("DeviceWrap::SetVSConstF #%d reg=%u count=%u first=(%.3f %.3f %.3f %.3f)",
-             m_diag_setvsconstf, StartRegister, Vector4fCount,
-             pConstantData[0], pConstantData[1], pConstantData[2], pConstantData[3]);
+        const float* m = pConstantData;
+        logf("DeviceWrap::SetVSConstF #%d reg=%u count=%u pass=%d matrix="
+             "[%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f]",
+             m_diag_setvsconstf, StartRegister, Vector4fCount, (int)m_pass,
+             m[0],  m[1],  m[2],  m[3],
+             m[4],  m[5],  m[6],  m[7],
+             m[8],  m[9],  m[10], m[11],
+             m[12], m[13], m[14], m[15]);
     }
     if (!m_runtime_enabled || !pConstantData || Vector4fCount < 4) {
         return m_real->SetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount);
@@ -459,6 +468,20 @@ HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
         }
         flip_column0(mutated + base);
         any_flipped = true;
+        ++m_total_flips;
+
+        if (m_diag_flips_logged < 5) {
+            ++m_diag_flips_logged;
+            const float* o = sub;       // original (pre-flip) sub-matrix
+            logf("flip #%d: reg=%u pass=%d base+reg=%u original="
+                 "[%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f]",
+                 m_diag_flips_logged, StartRegister, (int)m_pass,
+                 StartRegister + base/4,
+                 o[0],  o[1],  o[2],  o[3],
+                 o[4],  o[5],  o[6],  o[7],
+                 o[8],  o[9],  o[10], o[11],
+                 o[12], o[13], o[14], o[15]);
+        }
 
         // Promote unknown -> world: once we see a projection matrix
         // uploaded, it's almost certainly a world-rendering pass.
