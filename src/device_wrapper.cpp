@@ -409,17 +409,6 @@ HRESULT __stdcall DeviceWrap::SetRenderState(D3DRENDERSTATETYPE state, DWORD val
 
 HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
         UINT StartRegister, CONST float* pConstantData, UINT Vector4fCount) {
-    if (m_diag_setvsconstf < 20 && pConstantData && Vector4fCount >= 4) {
-        ++m_diag_setvsconstf;
-        const float* m = pConstantData;
-        logf("DeviceWrap::SetVSConstF #%d reg=%u count=%u pass=%d matrix="
-             "[%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f]",
-             m_diag_setvsconstf, StartRegister, Vector4fCount, (int)m_pass,
-             m[0],  m[1],  m[2],  m[3],
-             m[4],  m[5],  m[6],  m[7],
-             m[8],  m[9],  m[10], m[11],
-             m[12], m[13], m[14], m[15]);
-    }
     if (!m_runtime_enabled || !pConstantData || Vector4fCount < 4) {
         return m_real->SetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount);
     }
@@ -469,19 +458,6 @@ HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
         flip_column0(mutated + base);
         any_flipped = true;
         ++m_total_flips;
-
-        if (m_diag_flips_logged < 5) {
-            ++m_diag_flips_logged;
-            const float* o = sub;       // original (pre-flip) sub-matrix
-            logf("flip #%d: reg=%u pass=%d base+reg=%u original="
-                 "[%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f]",
-                 m_diag_flips_logged, StartRegister, (int)m_pass,
-                 StartRegister + base/4,
-                 o[0],  o[1],  o[2],  o[3],
-                 o[4],  o[5],  o[6],  o[7],
-                 o[8],  o[9],  o[10], o[11],
-                 o[12], o[13], o[14], o[15]);
-        }
 
         // Promote unknown -> world: once we see a projection matrix
         // uploaded, it's almost certainly a world-rendering pass.
