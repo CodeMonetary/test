@@ -401,7 +401,10 @@ HRESULT __stdcall DeviceWrap::SetViewport(CONST D3DVIEWPORT9* pViewport) {
 HRESULT __stdcall DeviceWrap::SetRenderState(D3DRENDERSTATETYPE state, DWORD value) {
     if (state == D3DRS_CULLMODE) {
         m_engine_cullmode = value;
-        if (m_runtime_enabled && m_pass == PassType::World) {
+        // v7: we flip only the ViewModel pass (weapon+hands). Everything
+        // else (world, HUD, post-process) is left untouched, so tonemap,
+        // fog and colour grading remain intact.
+        if (m_runtime_enabled && m_pass == PassType::ViewModel) {
             DWORD swapped = value;
             if (value == D3DCULL_CW)      swapped = D3DCULL_CCW;
             else if (value == D3DCULL_CCW) swapped = D3DCULL_CW;
@@ -457,7 +460,9 @@ HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
         if ((base & 15) != 0) continue;
         const float* sub = pConstantData + base;
 
-        if (m_pass != PassType::World) continue;
+        // v7: flip only on the ViewModel pass so weapon+hands are mirrored
+        // and the rest of the scene stays untouched.
+        if (m_pass != PassType::ViewModel) continue;
 
         bool want = false;
         if (looks_like_pure_projection(sub)) {
@@ -491,8 +496,8 @@ HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
 
 bool DeviceWrap::pre_draw() {
     // On every draw, ensure the cullmode on the device matches whether
-    // we are in a flipped world pass or not.
-    const bool active = (m_runtime_enabled && m_pass == PassType::World);
+    // we are in a flipped viewmodel pass or not.
+    const bool active = (m_runtime_enabled && m_pass == PassType::ViewModel);
     DWORD wanted = m_engine_cullmode;
     if (active) {
         if (m_engine_cullmode == D3DCULL_CW)      wanted = D3DCULL_CCW;
