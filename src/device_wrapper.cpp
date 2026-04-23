@@ -93,6 +93,18 @@ static bool looks_like_view_projection(const float* m) {
     return p33_zero && c3sq > 0.1f;
 }
 
+// Orthographic projection: m[3][3]~=1, m[2][3]~=0, m[0][0]/m[1][1] non-zero.
+// When this shows up we are in the 2D/HUD pass - don't flip.
+static bool looks_like_ortho(const float* m) {
+    const bool p23_zero = near_zero(m[2*4+3], 1e-3f);
+    const bool p33_one  = approx(m[3*4+3], 1.0f, 1e-3f);
+    const bool diag_nonzero =
+        !near_zero(m[0*4+0]) && !near_zero(m[1*4+1]);
+    // Row 2 column 2 is typically -1/(zf-zn) or similar - not required to
+    // match anything specific. Row 0 col 0 and row 1 col 1 must be scales.
+    return p23_zero && p33_one && diag_nonzero;
+}
+
 static void flip_column0(float* m /*4x4 row-major*/) {
     m[0*4+0] = -m[0*4+0];
     m[1*4+0] = -m[1*4+0];
@@ -240,7 +252,11 @@ HRESULT __stdcall DeviceWrap::BeginScene() {
     refresh_hotkey();
     ++m_frame_count;
     log_stats();
-    m_pass = PassType::Unknown;
+    // Start each frame assuming world; the usual CoD4 flow is
+    //   world(full depth) -> viewmodel(shrunk depth) -> HUD(ortho/ZENABLE=FALSE)
+    // so World is the right default. Transitions below will move us to
+    // ViewModel (on shrunk viewport) and HUD2D (on ortho/ZENABLE=FALSE).
+    m_pass = PassType::World;
     return m_real->BeginScene();
 }
 FWD(HRESULT, EndScene, (), ())
@@ -376,11 +392,19 @@ HRESULT __stdcall DeviceWrap::SetViewport(CONST D3DVIEWPORT9* pViewport) {
         m_viewport = *pViewport;
         m_viewport_valid = true;
 
-        // Classify by depth range:
-        //   * MaxZ - MinZ == 1.0  (full range)      -> SCENE (world or 2D HUD)
-        //   * MaxZ - MinZ  < 1.0  (shrunk range)    -> VIEWMODEL
-        if ((pViewport->MaxZ - pViewport->MinZ) < 0.98f) {
+        // CoD4 alternates viewports every frame:
+        //   shrunk depth (e.g. MinZ=0, MaxZ=~0.016)  -> viewmodel pass
+        //   full   depth (MinZ=~0.016, MaxZ=1.0)    -> world/HUD pass
+        // So flip back and forth.  Do NOT stomp HUD2D once we've set it
+        // via ZENABLE=FALSE or via an orthographic projection detection,
+        // because switching RTs for UI does not toggle the viewport back.
+        const float range = pViewport->MaxZ - pViewport->MinZ;
+        if (range < 0.9f) {
             m_pass = PassType::ViewModel;
+        } else {
+            if (m_pass == PassType::ViewModel) {
+                m_pass = PassType::World;
+            }
         }
     }
     return m_real->SetViewport(pViewport);
@@ -409,40 +433,68 @@ HRESULT __stdcall DeviceWrap::SetRenderState(D3DRENDERSTATETYPE state, DWORD val
 
 HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
         UINT StartRegister, CONST float* pConstantData, UINT Vector4fCount) {
-    if (!m_runtime_enabled || !pConstantData || Vector4fCount < 4) {
+    if (!pConstantData || Vector4fCount < 4) {
         return m_real->SetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount);
     }
 
-    // Scan the uploaded region for 4-register aligned projection-like matrices.
-    // We mutate into a local buffer and forward that.
     const UINT total_floats = Vector4fCount * 4;
-    // Fast path: none of the 4-register aligned sub-blocks match a
-    // projection shape -> just forward the original pointer.
-    // Slow path: one or more matches -> copy, mutate, forward.
 
+    // Phase 1: classify. We can always safely inspect uploaded matrices to
+    // update our pass, even if flipping is disabled.
+    for (UINT base = 0; base + 16 <= total_floats; base += 4) {
+        if ((base & 15) != 0) continue;
+        const float* sub = pConstantData + base;
+        if (looks_like_ortho(sub)) {
+            // 2D UI upload - mark as HUD so we do not accidentally flip
+            // this or anything that follows in the same frame.
+            m_pass = PassType::HUD2D;
+        } else if (looks_like_pure_projection(sub)) {
+            // Clean perspective projection -> world.
+            if (m_pass != PassType::HUD2D && m_pass != PassType::ViewModel) {
+                m_pass = PassType::World;
+            }
+        }
+    }
+
+    // Phase 2: diagnostic sampling (rare, bounded) - after frame 200 to skip
+    // the splash, log the first 10 matrices we see.  Gives us ground truth
+    // on what CoD4 actually uploads for the 3D scene.
+    if (m_diag_flips_logged < 10 && m_frame_count > 200) {
+        ++m_diag_flips_logged;
+        const float* m = pConstantData;
+        const bool is_ortho = looks_like_ortho(m);
+        const bool is_proj  = looks_like_pure_projection(m);
+        const bool is_vp    = looks_like_view_projection(m);
+        logf("vs_sample #%d reg=%u count=%u pass=%d ortho=%d proj=%d vp=%d "
+             "[%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f]",
+             m_diag_flips_logged, StartRegister, Vector4fCount, (int)m_pass,
+             (int)is_ortho, (int)is_proj, (int)is_vp,
+             m[0],  m[1],  m[2],  m[3],
+             m[4],  m[5],  m[6],  m[7],
+             m[8],  m[9],  m[10], m[11],
+             m[12], m[13], m[14], m[15]);
+    }
+
+    if (!m_runtime_enabled) {
+        return m_real->SetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount);
+    }
+
+    // Phase 3: flip column 0 of matrices that look like projection during
+    // world pass.  Mutate into a local buffer.
     bool any_flipped = false;
-    float tmp_stack[256];              // 64 vectors inline (most uploads are small)
+    float tmp_stack[256];
     float* mutated = nullptr;
 
     for (UINT base = 0; base + 16 <= total_floats; base += 4) {
-        // Only consider starting positions that fall on a 4-register boundary
-        // relative to StartRegister.
         if ((base & 15) != 0) continue;
         const float* sub = pConstantData + base;
 
-        // Decide whether to flip:
-        //   * World pass + pure projection signature  -> yes, safe.
-        //   * World pass + viewProjection signature   -> yes, good.
-        //   * Other passes -> never.
-        if (m_pass != PassType::World &&
-            m_pass != PassType::Unknown) {
-            continue;
-        }
+        if (m_pass != PassType::World) continue;
 
         bool want = false;
         if (looks_like_pure_projection(sub)) {
             want = true;
-        } else if (m_pass == PassType::World && looks_like_view_projection(sub)) {
+        } else if (looks_like_view_projection(sub)) {
             want = true;
         }
         if (!want) continue;
@@ -458,12 +510,6 @@ HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
         flip_column0(mutated + base);
         any_flipped = true;
         ++m_total_flips;
-
-        // Promote unknown -> world: once we see a projection matrix
-        // uploaded, it's almost certainly a world-rendering pass.
-        if (m_pass == PassType::Unknown) {
-            m_pass = PassType::World;
-        }
     }
 
     HRESULT hr = m_real->SetVertexShaderConstantF(
