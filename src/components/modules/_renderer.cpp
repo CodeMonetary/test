@@ -1059,36 +1059,79 @@ namespace components
 		const bool is_viewmodel_dhnc = (view_parms->depthHackNearClip != 0.0f);
 		const bool is_viewmodel_znear = (view_parms->zNear > 0.0f && view_parms->zNear < 1.0f);
 
-		bool apply_mirror = false;
-		switch (method)
-		{
-		case 1: // projection flip, gated by depthHackNearClip != 0
-			apply_mirror = is_viewmodel_dhnc;
-			break;
-		case 2: // projection flip, gated by zNear < 1.0
-			apply_mirror = is_viewmodel_znear;
-			break;
-		case 3: // projection flip, ungated (mirrors everything, diagnostic only)
-			apply_mirror = true;
-			break;
-		default: // 0 = off
-			break;
-		}
+		// Select mirror method. Each method modifies different matrices / axes to
+		// test where in the transform pipeline we can safely apply the mirror.
+		// Gated by depthHackNearClip != 0 (always true for viewmodel scene per logs).
+		const bool gate = is_viewmodel_dhnc;
+		_renderer::mirror_viewmodel_active = (method != 0 && gate);
 
-		_renderer::mirror_viewmodel_active = apply_mirror;
-		if (apply_mirror)
+		if (method != 0 && gate) switch (method)
 		{
+		case 1: // flip clip-space X (negate projection column 0). Original approach.
 			view_parms->projectionMatrix.m[0][0] = -view_parms->projectionMatrix.m[0][0];
 			view_parms->projectionMatrix.m[1][0] = -view_parms->projectionMatrix.m[1][0];
 			view_parms->projectionMatrix.m[2][0] = -view_parms->projectionMatrix.m[2][0];
 			view_parms->projectionMatrix.m[3][0] = -view_parms->projectionMatrix.m[3][0];
+			break;
+		case 2: // flip view-projection first row (mirror in model/world space pre-view).
+			// row-vector convention: VP' = scale(-1,1,1) * VP. Keeps clip-space X positive.
+			view_parms->viewProjectionMatrix.m[0][0] = -view_parms->viewProjectionMatrix.m[0][0];
+			view_parms->viewProjectionMatrix.m[0][1] = -view_parms->viewProjectionMatrix.m[0][1];
+			view_parms->viewProjectionMatrix.m[0][2] = -view_parms->viewProjectionMatrix.m[0][2];
+			view_parms->viewProjectionMatrix.m[0][3] = -view_parms->viewProjectionMatrix.m[0][3];
+			break;
+		case 3: // flip view matrix first row AND view-projection first row together.
+			view_parms->viewMatrix.m[0][0] = -view_parms->viewMatrix.m[0][0];
+			view_parms->viewMatrix.m[0][1] = -view_parms->viewMatrix.m[0][1];
+			view_parms->viewMatrix.m[0][2] = -view_parms->viewMatrix.m[0][2];
+			view_parms->viewMatrix.m[0][3] = -view_parms->viewMatrix.m[0][3];
+			view_parms->viewProjectionMatrix.m[0][0] = -view_parms->viewProjectionMatrix.m[0][0];
+			view_parms->viewProjectionMatrix.m[0][1] = -view_parms->viewProjectionMatrix.m[0][1];
+			view_parms->viewProjectionMatrix.m[0][2] = -view_parms->viewProjectionMatrix.m[0][2];
+			view_parms->viewProjectionMatrix.m[0][3] = -view_parms->viewProjectionMatrix.m[0][3];
+			break;
+		case 4: // negate camera right axis (axis[0]). Equivalent to physically mirrored camera.
+			view_parms->axis[0][0] = -view_parms->axis[0][0];
+			view_parms->axis[0][1] = -view_parms->axis[0][1];
+			view_parms->axis[0][2] = -view_parms->axis[0][2];
+			break;
+		case 5: // flip view matrix COLUMN 0 (mirror X in view space, pre-projection).
+			view_parms->viewMatrix.m[0][0] = -view_parms->viewMatrix.m[0][0];
+			view_parms->viewMatrix.m[1][0] = -view_parms->viewMatrix.m[1][0];
+			view_parms->viewMatrix.m[2][0] = -view_parms->viewMatrix.m[2][0];
+			view_parms->viewMatrix.m[3][0] = -view_parms->viewMatrix.m[3][0];
+			view_parms->viewProjectionMatrix.m[0][0] = -view_parms->viewProjectionMatrix.m[0][0];
+			view_parms->viewProjectionMatrix.m[1][0] = -view_parms->viewProjectionMatrix.m[1][0];
+			view_parms->viewProjectionMatrix.m[2][0] = -view_parms->viewProjectionMatrix.m[2][0];
+			view_parms->viewProjectionMatrix.m[3][0] = -view_parms->viewProjectionMatrix.m[3][0];
+			break;
+		case 6: // flip everything (axis + all matrices) - strongest mirror attempt
+			view_parms->axis[0][0] = -view_parms->axis[0][0];
+			view_parms->axis[0][1] = -view_parms->axis[0][1];
+			view_parms->axis[0][2] = -view_parms->axis[0][2];
+			view_parms->projectionMatrix.m[0][0] = -view_parms->projectionMatrix.m[0][0];
+			view_parms->projectionMatrix.m[1][0] = -view_parms->projectionMatrix.m[1][0];
+			view_parms->projectionMatrix.m[2][0] = -view_parms->projectionMatrix.m[2][0];
+			view_parms->projectionMatrix.m[3][0] = -view_parms->projectionMatrix.m[3][0];
+			view_parms->viewProjectionMatrix.m[0][0] = -view_parms->viewProjectionMatrix.m[0][0];
+			view_parms->viewProjectionMatrix.m[1][0] = -view_parms->viewProjectionMatrix.m[1][0];
+			view_parms->viewProjectionMatrix.m[2][0] = -view_parms->viewProjectionMatrix.m[2][0];
+			view_parms->viewProjectionMatrix.m[3][0] = -view_parms->viewProjectionMatrix.m[3][0];
+			break;
+		case 7: // flip only viewProjection column 0 (shader-facing matrix, clip-space X)
+			view_parms->viewProjectionMatrix.m[0][0] = -view_parms->viewProjectionMatrix.m[0][0];
+			view_parms->viewProjectionMatrix.m[1][0] = -view_parms->viewProjectionMatrix.m[1][0];
+			view_parms->viewProjectionMatrix.m[2][0] = -view_parms->viewProjectionMatrix.m[2][0];
+			view_parms->viewProjectionMatrix.m[3][0] = -view_parms->viewProjectionMatrix.m[3][0];
+			break;
+		default: break;
+		}
 
-			if (log_level >= 1)
-			{
-				game::Com_PrintMessage(0, utils::va(
-					"[mirror] APPLIED method=%d  dhnc=%.4f  zNear=%.4f\n",
-					method, view_parms->depthHackNearClip, view_parms->zNear), 0);
-			}
+		if (log_level >= 1 && method != 0 && gate)
+		{
+			game::Com_PrintMessage(0, utils::va(
+				"[mirror] APPLIED method=%d  dhnc=%.4f  zNear=%.4f\n",
+				method, view_parms->depthHackNearClip, view_parms->zNear), 0);
 		}
 	}
 	
@@ -1214,10 +1257,10 @@ namespace components
 
 		dvars::r_mirrorViewmodel_method = game::Dvar_RegisterInt(
 			/* name		*/ "r_mirrorViewmodel_method",
-			/* desc		*/ "Mirror viewmodel: 0=off, 1=proj flip (depthHackNearClip gate), 2=proj flip (zNear gate), 3=proj flip ungated (debug)",
+			/* desc		*/ "Mirror viewmodel method: 0=off, 1=proj col0, 2=VP row0, 3=view+VP row0, 4=axis[0], 5=view+VP col0, 6=axis+proj+VP col0, 7=VP col0 only",
 			/* default	*/ 0,
 			/* minVal	*/ 0,
-			/* maxVal	*/ 3,
+			/* maxVal	*/ 7,
 			/* flags	*/ game::dvar_flags::saved);
 
 		dvars::r_mirrorViewmodel_cullFix = game::Dvar_RegisterBool(
