@@ -4,11 +4,24 @@
 
 namespace wf {
 
+// {02177241-69FC-400C-8FF1-93A44DF6861D} - IID_IDirect3D9Ex
+static const IID IID_IDirect3D9Ex_local =
+    { 0x02177241, 0x69FC, 0x400C, { 0x8F, 0xF1, 0x93, 0xA4, 0x4D, 0xF6, 0x86, 0x1D } };
+
 HRESULT __stdcall D3D9Wrap::QueryInterface(REFIID riid, void** ppv) {
+    log_guid("D3D9Wrap::QI", riid);
+    // Refuse IDirect3D9Ex: if the caller gets the raw Ex, it bypasses our
+    // CreateDevice wrap entirely. Force the caller onto the non-Ex path.
+    if (riid == IID_IDirect3D9Ex_local) {
+        if (ppv) *ppv = nullptr;
+        logf("D3D9Wrap::QI declined IDirect3D9Ex");
+        return E_NOINTERFACE;
+    }
     HRESULT hr = m_real->QueryInterface(riid, ppv);
     if (SUCCEEDED(hr) && *ppv == static_cast<void*>(m_real)) {
         *ppv = static_cast<IDirect3D9*>(this);
     }
+    logf("D3D9Wrap::QI result hr=0x%08lx ppv=%p", (unsigned long)hr, ppv ? *ppv : nullptr);
     return hr;
 }
 ULONG __stdcall D3D9Wrap::AddRef()  { return m_real->AddRef(); }
@@ -63,7 +76,10 @@ HRESULT __stdcall D3D9Wrap::CreateDevice(
          pPresentationParameters ? (int)pPresentationParameters->BackBufferHeight : -1,
          pPresentationParameters ? (int)pPresentationParameters->Windowed         : -1,
          Adapter, (int)DeviceType);
-    *ppReturnedDeviceInterface = new DeviceWrap(real_dev, this);
+    DeviceWrap* wrap = new DeviceWrap(real_dev, this);
+    *ppReturnedDeviceInterface = wrap;
+    logf("CreateDevice returned IDirect3DDevice9* = %p (real=%p)",
+         (void*)wrap, (void*)real_dev);
     return hr;
 }
 

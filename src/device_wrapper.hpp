@@ -189,6 +189,23 @@ private:
     // Runtime toggle (hotkey)
     bool m_runtime_enabled = true;  // seeded from config.enabled at device creation
     bool m_last_key_down = false;
+
+    // Diagnostic "first-N-call" counters.
+    int m_diag_qi = 0;
+    int m_diag_addref = 0;
+    int m_diag_release = 0;
+    int m_diag_present = 0;
+    int m_diag_reset = 0;
+    int m_diag_setviewport = 0;
+    int m_diag_setvsconstf = 0;
+    int m_diag_setrenderstate = 0;
+    int m_diag_drawprim = 0;
+    int m_diag_drawindexed = 0;
+    int m_diag_drawprimup = 0;
+    int m_diag_drawindexedup = 0;
+    int m_diag_setrt = 0;
+    int m_diag_clear = 0;
+    int m_diag_beginscene = 0;
 };
 
 } // namespace wf

@@ -107,23 +107,53 @@ static void flip_column0(float* m /*4x4 row-major*/) {
 DeviceWrap::DeviceWrap(IDirect3DDevice9* real, D3D9Wrap* parent)
     : m_real(real), m_parent(parent) {
     m_runtime_enabled = g_cfg.enabled;
-    D3DPRESENT_PARAMETERS pp = {};
-    // not strictly needed; back-buffer size is captured via Reset/Present swap chain.
-    (void)pp;
-    logf("DeviceWrap: ctor, flip enabled=%d, toggle vk=0x%02x",
+    logf("DeviceWrap: ctor this=%p real=%p parent=%p, flip enabled=%d, toggle vk=0x%02x",
+         (void*)this, (void*)real, (void*)parent,
          (int)m_runtime_enabled, g_cfg.toggle_vk);
 }
 
+// {B18B10CE-2649-405A-870F-95F777D4313A} - IID_IDirect3DDevice9Ex
+static const IID IID_IDirect3DDevice9Ex_local =
+    { 0xB18B10CE, 0x2649, 0x405A, { 0x87, 0x0F, 0x95, 0xF7, 0x77, 0xD4, 0x31, 0x3A } };
+
 HRESULT __stdcall DeviceWrap::QueryInterface(REFIID riid, void** ppv) {
+    if (m_diag_qi < 16) {
+        log_guid("DeviceWrap::QI", riid);
+        ++m_diag_qi;
+    }
+    // Refuse IDirect3DDevice9Ex: the raw Ex pointer is different from our
+    // IDirect3DDevice9 wrapper, so if we let it through the caller renders
+    // through the raw device and bypasses our world-flip entirely.
+    if (riid == IID_IDirect3DDevice9Ex_local) {
+        if (ppv) *ppv = nullptr;
+        logf("DeviceWrap::QI declined IDirect3DDevice9Ex");
+        return E_NOINTERFACE;
+    }
     HRESULT hr = m_real->QueryInterface(riid, ppv);
     if (SUCCEEDED(hr) && *ppv == static_cast<void*>(m_real)) {
         *ppv = static_cast<IDirect3DDevice9*>(this);
     }
+    if (m_diag_qi <= 16) {
+        logf("DeviceWrap::QI result hr=0x%08lx ppv=%p",
+             (unsigned long)hr, ppv ? *ppv : nullptr);
+    }
     return hr;
 }
-ULONG __stdcall DeviceWrap::AddRef()  { return m_real->AddRef(); }
+ULONG __stdcall DeviceWrap::AddRef()  {
+    if (m_diag_addref < 10) {
+        ++m_diag_addref;
+        ULONG c = m_real->AddRef();
+        logf("DeviceWrap::AddRef -> %lu", (unsigned long)c);
+        return c;
+    }
+    return m_real->AddRef();
+}
 ULONG __stdcall DeviceWrap::Release() {
     ULONG c = m_real->Release();
+    if (m_diag_release < 10) {
+        ++m_diag_release;
+        logf("DeviceWrap::Release -> %lu", (unsigned long)c);
+    }
     if (c == 0) delete this;
     return c;
 }
@@ -160,6 +190,8 @@ FWD(HRESULT, CreateAdditionalSwapChain, (D3DPRESENT_PARAMETERS* p, IDirect3DSwap
 FWD(HRESULT, GetSwapChain, (UINT i, IDirect3DSwapChain9** s), (i, s))
 FWD(UINT,    GetNumberOfSwapChains, (), ())
 HRESULT __stdcall DeviceWrap::Reset(D3DPRESENT_PARAMETERS* pp) {
+    ++m_diag_reset;
+    logf("DeviceWrap::Reset #%d this=%p", m_diag_reset, (void*)this);
     HRESULT hr = m_real->Reset(pp);
     if (SUCCEEDED(hr) && pp) {
         m_bb_w = pp->BackBufferWidth;
@@ -187,13 +219,32 @@ FWD(HRESULT, GetFrontBufferData, (UINT a, IDirect3DSurface9* b), (a, b))
 FWD(HRESULT, StretchRect, (IDirect3DSurface9* a, CONST RECT* b, IDirect3DSurface9* c, CONST RECT* d, D3DTEXTUREFILTERTYPE f), (a, b, c, d, f))
 FWD(HRESULT, ColorFill, (IDirect3DSurface9* s, CONST RECT* r, D3DCOLOR c), (s, r, c))
 FWD(HRESULT, CreateOffscreenPlainSurface, (UINT w, UINT h, D3DFORMAT f, D3DPOOL p, IDirect3DSurface9** s, HANDLE* hs), (w, h, f, p, s, hs))
-FWD(HRESULT, SetRenderTarget, (DWORD i, IDirect3DSurface9* s), (i, s))
+HRESULT __stdcall DeviceWrap::SetRenderTarget(DWORD i, IDirect3DSurface9* s) {
+    if (m_diag_setrt < 5) {
+        ++m_diag_setrt;
+        logf("DeviceWrap::SetRenderTarget #%d index=%lu surface=%p",
+             m_diag_setrt, (unsigned long)i, (void*)s);
+    }
+    return m_real->SetRenderTarget(i, s);
+}
 FWD(HRESULT, GetRenderTarget, (DWORD i, IDirect3DSurface9** s), (i, s))
 FWD(HRESULT, SetDepthStencilSurface, (IDirect3DSurface9* s), (s))
 FWD(HRESULT, GetDepthStencilSurface, (IDirect3DSurface9** s), (s))
-FWD(HRESULT, BeginScene, (), ())
+HRESULT __stdcall DeviceWrap::BeginScene() {
+    if (m_diag_beginscene < 3) {
+        ++m_diag_beginscene;
+        logf("DeviceWrap::BeginScene #%d this=%p", m_diag_beginscene, (void*)this);
+    }
+    return m_real->BeginScene();
+}
 FWD(HRESULT, EndScene, (), ())
-FWD(HRESULT, Clear, (DWORD c, CONST D3DRECT* r, DWORD f, D3DCOLOR col, float z, DWORD s), (c, r, f, col, z, s))
+HRESULT __stdcall DeviceWrap::Clear(DWORD c, CONST D3DRECT* r, DWORD f, D3DCOLOR col, float z, DWORD s) {
+    if (m_diag_clear < 3) {
+        ++m_diag_clear;
+        logf("DeviceWrap::Clear #%d flags=0x%lx", m_diag_clear, (unsigned long)f);
+    }
+    return m_real->Clear(c, r, f, col, z, s);
+}
 FWD(HRESULT, SetTransform, (D3DTRANSFORMSTATETYPE t, CONST D3DMATRIX* m), (t, m))
 FWD(HRESULT, GetTransform, (D3DTRANSFORMSTATETYPE t, D3DMATRIX* m), (t, m))
 FWD(HRESULT, MultiplyTransform, (D3DTRANSFORMSTATETYPE t, CONST D3DMATRIX* m), (t, m))
@@ -297,6 +348,10 @@ void DeviceWrap::log_stats() {
 }
 
 HRESULT __stdcall DeviceWrap::Present(CONST RECT* a, CONST RECT* b, HWND w, CONST RGNDATA* r) {
+    if (m_diag_present < 3) {
+        ++m_diag_present;
+        logf("DeviceWrap::Present #%d this=%p", m_diag_present, (void*)this);
+    }
     refresh_hotkey();
     ++m_frame_count;
     log_stats();
@@ -306,6 +361,13 @@ HRESULT __stdcall DeviceWrap::Present(CONST RECT* a, CONST RECT* b, HWND w, CONS
 }
 
 HRESULT __stdcall DeviceWrap::SetViewport(CONST D3DVIEWPORT9* pViewport) {
+    if (pViewport && m_diag_setviewport < 5) {
+        ++m_diag_setviewport;
+        logf("DeviceWrap::SetViewport #%d x=%u y=%u w=%u h=%u MinZ=%.4f MaxZ=%.4f",
+             m_diag_setviewport,
+             pViewport->X, pViewport->Y, pViewport->Width, pViewport->Height,
+             pViewport->MinZ, pViewport->MaxZ);
+    }
     if (pViewport) {
         m_viewport = *pViewport;
         m_viewport_valid = true;
@@ -343,6 +405,12 @@ HRESULT __stdcall DeviceWrap::SetRenderState(D3DRENDERSTATETYPE state, DWORD val
 
 HRESULT __stdcall DeviceWrap::SetVertexShaderConstantF(
         UINT StartRegister, CONST float* pConstantData, UINT Vector4fCount) {
+    if (m_diag_setvsconstf < 5 && pConstantData && Vector4fCount >= 4) {
+        ++m_diag_setvsconstf;
+        logf("DeviceWrap::SetVSConstF #%d reg=%u count=%u first=(%.3f %.3f %.3f %.3f)",
+             m_diag_setvsconstf, StartRegister, Vector4fCount,
+             pConstantData[0], pConstantData[1], pConstantData[2], pConstantData[3]);
+    }
     if (!m_runtime_enabled || !pConstantData || Vector4fCount < 4) {
         return m_real->SetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount);
     }
@@ -434,6 +502,11 @@ void DeviceWrap::post_draw(bool) {
 
 HRESULT __stdcall DeviceWrap::DrawPrimitive(
         D3DPRIMITIVETYPE pt, UINT start, UINT count) {
+    if (m_diag_drawprim < 3) {
+        ++m_diag_drawprim;
+        logf("DeviceWrap::DrawPrimitive #%d pass=%d pt=%d start=%u count=%u",
+             m_diag_drawprim, (int)m_pass, (int)pt, start, count);
+    }
     const bool f = pre_draw();
     HRESULT hr = m_real->DrawPrimitive(pt, start, count);
     post_draw(f);
@@ -441,6 +514,11 @@ HRESULT __stdcall DeviceWrap::DrawPrimitive(
 }
 HRESULT __stdcall DeviceWrap::DrawIndexedPrimitive(
         D3DPRIMITIVETYPE pt, INT bvi, UINT mvi, UINT nv, UINT si, UINT pc) {
+    if (m_diag_drawindexed < 3) {
+        ++m_diag_drawindexed;
+        logf("DeviceWrap::DrawIndexedPrimitive #%d pass=%d nv=%u pc=%u",
+             m_diag_drawindexed, (int)m_pass, nv, pc);
+    }
     const bool f = pre_draw();
     HRESULT hr = m_real->DrawIndexedPrimitive(pt, bvi, mvi, nv, si, pc);
     post_draw(f);
@@ -448,6 +526,11 @@ HRESULT __stdcall DeviceWrap::DrawIndexedPrimitive(
 }
 HRESULT __stdcall DeviceWrap::DrawPrimitiveUP(
         D3DPRIMITIVETYPE pt, UINT pc, CONST void* vd, UINT s) {
+    if (m_diag_drawprimup < 3) {
+        ++m_diag_drawprimup;
+        logf("DeviceWrap::DrawPrimitiveUP #%d pass=%d pc=%u",
+             m_diag_drawprimup, (int)m_pass, pc);
+    }
     const bool f = pre_draw();
     HRESULT hr = m_real->DrawPrimitiveUP(pt, pc, vd, s);
     post_draw(f);
@@ -456,6 +539,11 @@ HRESULT __stdcall DeviceWrap::DrawPrimitiveUP(
 HRESULT __stdcall DeviceWrap::DrawIndexedPrimitiveUP(
         D3DPRIMITIVETYPE pt, UINT mvi, UINT nv, UINT pc,
         CONST void* idx, D3DFORMAT ifmt, CONST void* vd, UINT s) {
+    if (m_diag_drawindexedup < 3) {
+        ++m_diag_drawindexedup;
+        logf("DeviceWrap::DrawIndexedPrimitiveUP #%d pass=%d pc=%u",
+             m_diag_drawindexedup, (int)m_pass, pc);
+    }
     const bool f = pre_draw();
     HRESULT hr = m_real->DrawIndexedPrimitiveUP(pt, mvi, nv, pc, idx, ifmt, vd, s);
     post_draw(f);

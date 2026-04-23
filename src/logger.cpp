@@ -1,9 +1,11 @@
 #include "logger.hpp"
 
 #include <windows.h>
+#include <psapi.h>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
 
 namespace wf {
 
@@ -58,6 +60,44 @@ void logf(const char* fmt, ...) {
     fputc('\n', g_fp);
     fflush(g_fp);
     LeaveCriticalSection(&g_cs);
+}
+
+void log_guid(const char* prefix, REFIID riid) {
+    if (!g_fp) return;
+    logf("%s {%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+         prefix,
+         (unsigned long)riid.Data1, riid.Data2, riid.Data3,
+         riid.Data4[0], riid.Data4[1], riid.Data4[2], riid.Data4[3],
+         riid.Data4[4], riid.Data4[5], riid.Data4[6], riid.Data4[7]);
+}
+
+void log_loaded_modules() {
+    if (!g_fp) return;
+    HANDLE hproc = GetCurrentProcess();
+    HMODULE mods[1024];
+    DWORD needed = 0;
+    if (!EnumProcessModules(hproc, mods, sizeof(mods), &needed)) return;
+    const DWORD count = needed / sizeof(HMODULE);
+    for (DWORD i = 0; i < count; ++i) {
+        char path[MAX_PATH] = {0};
+        if (!GetModuleFileNameA(mods[i], path, sizeof(path))) continue;
+        // Lowercase basename for filtering.
+        char base[MAX_PATH] = {0};
+        const char* slash = std::strrchr(path, '\\');
+        const char* b = slash ? slash + 1 : path;
+        for (int j = 0; b[j] && j < (int)sizeof(base) - 1; ++j) {
+            base[j] = (char)std::tolower((unsigned char)b[j]);
+        }
+        if (std::strstr(base, "d3d9") ||
+            std::strstr(base, "dxgi") ||
+            std::strstr(base, "reshade") ||
+            std::strstr(base, "enbseries") ||
+            std::strstr(base, "dinput8") ||
+            std::strstr(base, "cod4x") ||
+            std::strstr(base, "iw3xo")) {
+            logf("module: %p %s", (void*)mods[i], path);
+        }
+    }
 }
 
 } // namespace wf

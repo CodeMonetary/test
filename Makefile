@@ -14,7 +14,7 @@ LDFLAGS  := -shared -static -static-libgcc -static-libstdc++ \
             -Wl,--kill-at \
             -Wl,--subsystem,windows
 
-LIBS     := -ld3d9 -lgdi32 -luser32 -lkernel32 -lole32
+LIBS     := -ld3d9 -lgdi32 -luser32 -lkernel32 -lole32 -lpsapi
 
 SRC := src/dllmain.cpp \
        src/d3d9_wrapper.cpp \
