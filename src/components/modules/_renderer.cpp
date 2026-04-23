@@ -2,6 +2,11 @@
 
 namespace components
 {
+	// r_mirrorViewmodel :: shared flag consumed by d3d9ex::SetRenderState to
+	// invert D3DRS_CULLMODE while the viewmodel is being drawn (projection is
+	// mirrored in set_gunfov, which reverses winding order on screen).
+	volatile bool _renderer::mirror_viewmodel_active = false;
+
 	/* ---------------------------------------------------------- */
 	/* ------------ create dynamic rendering buffers ------------ */
 
@@ -1035,6 +1040,25 @@ namespace components
 			// only overwrite the projection matrix ;)
 			memcpy(view_parms->projectionMatrix.m, proj_mtx, sizeof(game::GfxMatrix));
 		}
+
+		// r_mirrorViewmodel :: horizontally mirror the viewmodel (weapon + hands)
+		// while keeping the world and 2D/HUD unaffected.
+		// The hook at 0x5FAA05 inside R_SetViewParmsForScene is only reached for the
+		// viewmodel scene (same hook point cg_fov_gun relies on), so modifying the
+		// projection matrix here does not affect the world or HUD passes.
+		// Negating column 0 of the projection matrix flips the clip-space X for every
+		// viewmodel vertex, producing a mirrored image. This also reverses the screen
+		// winding order of the mesh; the cull mode is re-inverted by d3d9ex so front
+		// faces stay visible. See d3d9ex::SetRenderState + _renderer::mirror_viewmodel_active.
+		const bool want_mirror = dvars::r_mirrorViewmodel && dvars::r_mirrorViewmodel->current.enabled;
+		_renderer::mirror_viewmodel_active = want_mirror;
+		if (want_mirror)
+		{
+			view_parms->projectionMatrix.m[0][0] = -view_parms->projectionMatrix.m[0][0];
+			view_parms->projectionMatrix.m[1][0] = -view_parms->projectionMatrix.m[1][0];
+			view_parms->projectionMatrix.m[2][0] = -view_parms->projectionMatrix.m[2][0];
+			view_parms->projectionMatrix.m[3][0] = -view_parms->projectionMatrix.m[3][0];
+		}
 	}
 	
 	__declspec(naked) void R_SetViewParmsForScene_stub()
@@ -1155,6 +1179,12 @@ namespace components
 			/* default	*/ 65.0f,
 			/* minVal	*/ 20.0f,
 			/* maxVal	*/ 160.0f,
+			/* flags	*/ game::dvar_flags::saved);
+
+		dvars::r_mirrorViewmodel = game::Dvar_RegisterBool(
+			/* name		*/ "r_mirrorViewmodel",
+			/* desc		*/ "Horizontally mirror the viewmodel (weapon + hands) without mirroring the world or HUD",
+			/* default	*/ false,
 			/* flags	*/ game::dvar_flags::saved);
 
 		// increase fps cap to 125 for menus and loadscreen

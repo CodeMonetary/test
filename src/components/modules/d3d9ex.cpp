@@ -329,6 +329,17 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetRenderState(D3DRENDERSTATETYPE State, DWORD Value)
 	{
+		// r_mirrorViewmodel: when the viewmodel projection is horizontally flipped
+		// (see _renderer::set_gunfov), screen-space winding order is reversed and all
+		// viewmodel triangles would be culled as back faces. Invert CULLMODE for the
+		// duration of the viewmodel scene so front faces stay visible.
+		// NONE stays NONE; CW<->CCW swap.
+		if (State == D3DRS_CULLMODE && _renderer::mirror_viewmodel_active)
+		{
+			if (Value == D3DCULL_CW) Value = D3DCULL_CCW;
+			else if (Value == D3DCULL_CCW) Value = D3DCULL_CW;
+		}
+
 		return m_pIDirect3DDevice9->SetRenderState(State, Value);
 	}
 
