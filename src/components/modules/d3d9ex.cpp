@@ -343,23 +343,38 @@ namespace components
 		{
 			const int log_level = dvars::r_mirrorViewmodel_log
 				? dvars::r_mirrorViewmodel_log->current.integer : 0;
-			const bool cull_fix = dvars::r_mirrorViewmodel_cullFix
-				? dvars::r_mirrorViewmodel_cullFix->current.enabled : false;
+			const int cull_mode = dvars::r_mirrorViewmodel_cullFix
+				? dvars::r_mirrorViewmodel_cullFix->current.integer : 0;
 
 			const DWORD original_value = Value;
 			bool swapped = false;
-			if (cull_fix && _renderer::mirror_viewmodel_active)
+			if (_renderer::mirror_viewmodel_active && cull_mode != 0)
 			{
-				if (Value == D3DCULL_CW)       { Value = D3DCULL_CCW; swapped = true; }
-				else if (Value == D3DCULL_CCW) { Value = D3DCULL_CW;  swapped = true; }
+				switch (cull_mode)
+				{
+				case 1: // swap CW<->CCW, leave NONE alone
+					if (Value == D3DCULL_CW)       { Value = D3DCULL_CCW; swapped = true; }
+					else if (Value == D3DCULL_CCW) { Value = D3DCULL_CW;  swapped = true; }
+					break;
+				case 2: // force CCW (also overrides NONE); handles the case where game
+					// draws viewmodel with CULL_NONE so winding-inversion has no effect.
+					if (Value != D3DCULL_CCW) { Value = D3DCULL_CCW; swapped = true; }
+					break;
+				case 3: // force CW (opposite, for comparison)
+					if (Value != D3DCULL_CW) { Value = D3DCULL_CW; swapped = true; }
+					break;
+				case 4: // force NONE (no culling on viewmodel while mirrored)
+					if (Value != D3DCULL_NONE) { Value = D3DCULL_NONE; swapped = true; }
+					break;
+				}
 			}
 
 			if (log_level >= 2)
 			{
 				game::Com_PrintMessage(0, utils::va(
-					"[mirror] CULLMODE: in=%u out=%u active=%d cullFix=%d swapped=%d\n",
+					"[mirror] CULLMODE: in=%u out=%u active=%d mode=%d swapped=%d\n",
 					original_value, Value, (int)_renderer::mirror_viewmodel_active,
-					(int)cull_fix, (int)swapped), 0);
+					cull_mode, (int)swapped), 0);
 			}
 		}
 

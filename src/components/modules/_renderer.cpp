@@ -1263,10 +1263,12 @@ namespace components
 			/* maxVal	*/ 7,
 			/* flags	*/ game::dvar_flags::saved);
 
-		dvars::r_mirrorViewmodel_cullFix = game::Dvar_RegisterBool(
+		dvars::r_mirrorViewmodel_cullFix = game::Dvar_RegisterInt(
 			/* name		*/ "r_mirrorViewmodel_cullFix",
-			/* desc		*/ "Invert CW/CCW cull mode during mirrored viewmodel draws (prevents inside-out mesh)",
-			/* default	*/ true,
+			/* desc		*/ "Cull-mode override during mirrored viewmodel: 0=off, 1=swap CW<->CCW, 2=force CCW, 3=force CW, 4=force NONE",
+			/* default	*/ 2,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 4,
 			/* flags	*/ game::dvar_flags::saved);
 
 		dvars::r_mirrorViewmodel_log = game::Dvar_RegisterInt(
