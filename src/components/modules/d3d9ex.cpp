@@ -630,19 +630,23 @@ namespace components
 		//                     if no change, c0-c3 isn't used by gun vs at all)
 		float local_mtx[16];
 		const float* out_data = pConstantData;
-		bool is_mtx = (pConstantData && StartRegister == 0 && Vector4fCount == 4);
+		// is_mtx_at_zero detects c0-c3 matrix uploads (used for dhp/stdp arming logic only)
+		const bool is_mtx_at_zero = (pConstantData && StartRegister == 0 && Vector4fCount == 4);
 		float c23 = 0.0f;
-		if (is_mtx) { c23 = pConstantData[11]; } // c2[3]
-		const bool is_depth_hack_proj = is_mtx && (c23 < -0.02f && c23 > -0.50f);
-		const bool is_std_proj        = is_mtx && (c23 < -1.00f);
+		if (is_mtx_at_zero) { c23 = pConstantData[11]; } // c2[3]
+		const bool is_depth_hack_proj = is_mtx_at_zero && (c23 < -0.02f && c23 > -0.50f);
+		const bool is_std_proj        = is_mtx_at_zero && (c23 < -1.00f);
 
 		const int flipVSCF = dvars::r_mirrorViewmodel_flipVSCF
 			? dvars::r_mirrorViewmodel_flipVSCF->current.integer : 0;
 		const int flipFollow = dvars::r_mirrorViewmodel_flipFollow
 			? dvars::r_mirrorViewmodel_flipFollow->current.integer : 0;
 		const int flipAxis = dvars::r_mirrorViewmodel_flipAxis
-			? dvars::r_mirrorViewmodel_flipAxis->current.integer : 1;
+			? dvars::r_mirrorViewmodel_flipAxis->current.integer : 4;
+		const int flipReg = dvars::r_mirrorViewmodel_flipReg
+			? dvars::r_mirrorViewmodel_flipReg->current.integer : 0;
 
+		// Arm/disarm follow window from c0-c3 dhp/stdp detection. Independent of flipReg.
 		if (is_depth_hack_proj)
 		{
 			_renderer::mirror_vscf_follow_remaining = flipFollow;
@@ -652,41 +656,73 @@ namespace components
 			_renderer::mirror_vscf_follow_remaining = 0;
 		}
 
+		// Apply flip if: this upload is a 4-row matrix at the configured flipReg AND we are in
+		// a gun pass (dhp itself, or within follow window when flipVSCF==2).
+		const bool is_target_mtx = (pConstantData && Vector4fCount == 4 && (int)StartRegister == flipReg);
 		bool apply_flip = false;
-		if (is_mtx && flipVSCF != 0)
+		if (is_target_mtx && flipVSCF != 0)
 		{
-			if (flipVSCF == 1 && is_depth_hack_proj) apply_flip = true;
-			if (flipVSCF == 2 && (is_depth_hack_proj || _renderer::mirror_vscf_follow_remaining > 0))
-				apply_flip = true;
+			if (flipReg == 0)
+			{
+				// Targeting c0-c3: only flip the dhp upload itself (mode 1) or dhp+follow (mode 2).
+				if (flipVSCF == 1 && is_depth_hack_proj) apply_flip = true;
+				if (flipVSCF == 2 && (is_depth_hack_proj || _renderer::mirror_vscf_follow_remaining > 0))
+					apply_flip = true;
+			}
+			else
+			{
+				// Targeting c4-c7 / c24-c27 / etc: only fires DURING the gun pass (follow window > 0).
+				// These registers do not carry the dhp signature, so we rely on the follow window
+				// to know we are in a gun draw block. flipVSCF mode is treated the same here.
+				if (_renderer::mirror_vscf_follow_remaining > 0) apply_flip = true;
+			}
 		}
 
 		if (apply_flip)
 		{
 			for (int i = 0; i < 16; ++i) local_mtx[i] = pConstantData[i];
-			if (flipAxis == 0 || flipAxis == 2)
-			{
+			// flipAxis selects which subset of the 4x4 matrix to negate.
+			//   0..3 = negate row N of register block (4 floats: local_mtx[N*4 .. N*4+3])
+			//          - this is row N of matrix if storage is row-major
+			//   4..7 = negate "col" N: local_mtx[N], local_mtx[N+4], local_mtx[N+8], local_mtx[N+12]
+			//          - this is row N of matrix if storage is column-major (D3D9 default)
+			//   8    = full: all 16 floats negated (clip.w flips sign -> gun clipped behind cam)
+			//   9    = row 0 + col 0 simultaneously (v10 axis=2 belt-and-suspenders behavior)
+			switch (flipAxis) {
+			case 0: case 1: case 2: case 3: {
+				const int base = flipAxis * 4;
+				local_mtx[base+0] = -local_mtx[base+0];
+				local_mtx[base+1] = -local_mtx[base+1];
+				local_mtx[base+2] = -local_mtx[base+2];
+				local_mtx[base+3] = -local_mtx[base+3];
+			} break;
+			case 4: case 5: case 6: case 7: {
+				const int off = flipAxis - 4;
+				local_mtx[off+0]  = -local_mtx[off+0];
+				local_mtx[off+4]  = -local_mtx[off+4];
+				local_mtx[off+8]  = -local_mtx[off+8];
+				local_mtx[off+12] = -local_mtx[off+12];
+			} break;
+			case 8:
+				for (int i = 0; i < 16; ++i) local_mtx[i] = -local_mtx[i];
+				break;
+			case 9:
 				local_mtx[0]  = -local_mtx[0];
 				local_mtx[1]  = -local_mtx[1];
 				local_mtx[2]  = -local_mtx[2];
 				local_mtx[3]  = -local_mtx[3];
-			}
-			if (flipAxis == 1 || flipAxis == 2)
-			{
-				local_mtx[0]  = -local_mtx[0];
+				local_mtx[0]  = -local_mtx[0]; // double-negate first elem -> back to orig
 				local_mtx[4]  = -local_mtx[4];
 				local_mtx[8]  = -local_mtx[8];
 				local_mtx[12] = -local_mtx[12];
-			}
-			if (flipAxis == 3)
-			{
-				for (int i = 0; i < 16; ++i) local_mtx[i] = -local_mtx[i];
+				break;
 			}
 			out_data = local_mtx;
 		}
 
 		// Decay the follow window after applying. Don't decay on the dhp upload itself
 		// (it just rearmed); decay on every other matrix upload while armed.
-		if (is_mtx && !is_depth_hack_proj && _renderer::mirror_vscf_follow_remaining > 0)
+		if (is_mtx_at_zero && !is_depth_hack_proj && _renderer::mirror_vscf_follow_remaining > 0)
 		{
 			--_renderer::mirror_vscf_follow_remaining;
 		}

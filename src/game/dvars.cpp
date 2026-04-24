@@ -184,6 +184,7 @@ namespace dvars
 	game::dvar_s* r_mirrorViewmodel_flipVSCF = nullptr;
 	game::dvar_s* r_mirrorViewmodel_flipFollow = nullptr;
 	game::dvar_s* r_mirrorViewmodel_flipAxis = nullptr;
+	game::dvar_s* r_mirrorViewmodel_flipReg = nullptr;
 	game::dvar_s* bg_bobIdle = nullptr;
 	
 	// Debug Collision

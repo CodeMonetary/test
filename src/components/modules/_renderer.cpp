@@ -1508,10 +1508,18 @@ namespace components
 
 		dvars::r_mirrorViewmodel_flipAxis = game::Dvar_RegisterInt(
 			/* name		*/ "r_mirrorViewmodel_flipAxis",
-			/* desc		*/ "Which matrix axis to negate when flipVSCF fires. 0=row (negate c0 register = first 4 floats; v8 behavior, doesn't visually mirror). 1=col (negate first element of each register = first row of matrix when stored column-major; this is the actual clip.x output row in D3D9/HLSL default convention). 2=both. 3=full negation (diagnostic: if gun is visibly distorted/invisible, the matrix IS used by gun vs).",
-			/* default	*/ 1,
+			/* desc		*/ "v11: which 4-float subset of the targeted register block to negate. 0..3 = negate row N (4 contiguous floats: locals[N*4..N*4+3] = register cN entirely - row N if storage is row-major). 4..7 = negate column N (locals[N], locals[N+4], locals[N+8], locals[N+12] = first/2nd/3rd/4th element of each register - row N if storage is column-major / D3D9 default). 8 = full negation (all 16 floats; clip.w sign flips -> gun clipped behind camera; diagnostic). 9 = row 0 + col 0 combined (v10 axis=2). For a clean clip.x mirror, exactly ONE of values 0..7 should produce horizontal flip - which one identifies the matrix layout.",
+			/* default	*/ 4,
 			/* minVal	*/ 0,
-			/* maxVal	*/ 3,
+			/* maxVal	*/ 9,
+			/* flags	*/ game::dvar_flags::saved);
+
+		dvars::r_mirrorViewmodel_flipReg = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_flipReg",
+			/* desc		*/ "v11: which register start to apply the flip to when flipVSCF fires. 0 = c0-c3 (the depth-hack proj/wvp, default). 4 = c4-c7 (per-mesh world matrix). 24 = c24-c27 (alt matrix uploaded only during DHP #2 / hands pass). Use this to test which register set the gun vertex shader actually uses for clip-space transform - if c0-c3 flip with all flipAxis values 0..7 produces no clean mirror, try flipReg 4 or 24.",
+			/* default	*/ 0,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 64,
 			/* flags	*/ game::dvar_flags::saved);
 
 		// increase fps cap to 125 for menus and loadscreen
