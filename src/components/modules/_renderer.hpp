@@ -14,6 +14,11 @@ namespace components
 		// consumed by d3d9ex::SetRenderState to invert D3DRS_CULLMODE on viewmodel draws
 		static volatile bool mirror_viewmodel_active;
 
+		// r_mirrorViewmodel v8: armed when a depth-hack proj VSCF is uploaded; decremented
+		// per non-dhp matrix VSCF; cleared on std-proj VSCF. Used by SetVertexShaderConstantF
+		// to also flip the lighting / per-mesh constants that follow the gun matrix.
+		static volatile int  mirror_vscf_follow_remaining;
+
 		// r_mirrorViewmodel dump : when > 0, hooks write detailed frame data to a file.
 		// Set via `mirror_dump <N>` console command. Decremented by d3d9ex::Present.
 		static volatile int  mirror_dump_frames_remaining;

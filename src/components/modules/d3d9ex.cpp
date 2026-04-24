@@ -599,11 +599,22 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetVertexShaderConstantF(UINT StartRegister, CONST float* pConstantData, UINT Vector4fCount)
 	{
-		// r_mirrorViewmodel: matrix-upload heuristic.
+		// r_mirrorViewmodel v8: matrix-upload heuristic.
 		// In IW3, the vertex-shader constant at c0-c3 is transpose(worldViewProjection).
 		// c2[3] ~= -0.1  => depth-hack projection (viewmodel gun pass)
-		// c2[3] ~= -3.998 => standard scene projection (NOT gun; 3D effects after gun)
-		// We use c2[3] to (a) bound the vm_active window and (b) selectively flip the gun matrix in-shader.
+		// c2[3] ~= -3.998 => standard scene projection (NOT gun)
+		//
+		// v7 had two bugs surfaced by user dumps:
+		//   1. flipVSCF was gated on mirror_viewmodel_active, but that flag is only set when
+		//      r_mirrorViewmodel_method != 0. So pure-VSCF mode (method=0, flipVSCF=1) never fired.
+		//   2. Auto-narrow on stdp fired BEFORE the gun pass arrived. Frame order is actually
+		//      SVP -> non-proj VSCF -> stdp(world) -> dhp(gun). Clearing on stdp killed gun.
+		//
+		// v8 fix: flipVSCF is independent of vm_active. Detection is purely per-VSCF c2[3]:
+		//   - mode 1: flip ONLY the depth-hack proj upload itself (the gun matrix).
+		//   - mode 2: flip the dhp upload AND the next r_mirrorViewmodel_flipFollow matrix
+		//             uploads (lighting / per-mesh constants in the same gun draw block).
+		//             The follow window arms on dhp, disarms on stdp.
 		float local_mtx[16];
 		const float* out_data = pConstantData;
 		bool is_mtx = (pConstantData && StartRegister == 0 && Vector4fCount == 4);
@@ -612,35 +623,43 @@ namespace components
 		const bool is_depth_hack_proj = is_mtx && (c23 < -0.02f && c23 > -0.50f);
 		const bool is_std_proj        = is_mtx && (c23 < -1.00f);
 
-		// Narrow the vm_active window: when a standard projection matrix is uploaded
-		// while vm_active is true, we are past the gun pass (entering 3D fx/tracers/decals).
-		// Clear the flag so those draws are not flagged as viewmodel.
-		if (_renderer::mirror_viewmodel_active && is_std_proj)
-		{
-			_renderer::mirror_viewmodel_active = false;
-		}
-
 		const int flipVSCF = dvars::r_mirrorViewmodel_flipVSCF
 			? dvars::r_mirrorViewmodel_flipVSCF->current.integer : 0;
+		const int flipFollow = dvars::r_mirrorViewmodel_flipFollow
+			? dvars::r_mirrorViewmodel_flipFollow->current.integer : 0;
 
-		// When vm_active and flipVSCF enabled, negate the first register (column 0 of the
-		// transposed viewProj). This flips clip-space X for every shader that mul()s
-		// vertex positions against c0-c3 -- catches both of the engine's two upload paths
-		// that produce the inconsistent mirror (12 flipped vs 113 non-flipped in dumps).
-		if (is_mtx && _renderer::mirror_viewmodel_active && flipVSCF != 0)
+		if (is_depth_hack_proj)
 		{
-			bool apply = false;
-			if (flipVSCF == 1 && is_depth_hack_proj) apply = true;
-			if (flipVSCF == 2)                      apply = true;
-			if (apply)
-			{
-				for (int i = 0; i < 16; ++i) local_mtx[i] = pConstantData[i];
-				local_mtx[0] = -local_mtx[0];
-				local_mtx[1] = -local_mtx[1];
-				local_mtx[2] = -local_mtx[2];
-				local_mtx[3] = -local_mtx[3];
-				out_data = local_mtx;
-			}
+			_renderer::mirror_vscf_follow_remaining = flipFollow;
+		}
+		else if (is_std_proj)
+		{
+			_renderer::mirror_vscf_follow_remaining = 0;
+		}
+
+		bool apply_flip = false;
+		if (is_mtx && flipVSCF != 0)
+		{
+			if (flipVSCF == 1 && is_depth_hack_proj) apply_flip = true;
+			if (flipVSCF == 2 && (is_depth_hack_proj || _renderer::mirror_vscf_follow_remaining > 0))
+				apply_flip = true;
+		}
+
+		if (apply_flip)
+		{
+			for (int i = 0; i < 16; ++i) local_mtx[i] = pConstantData[i];
+			local_mtx[0] = -local_mtx[0];
+			local_mtx[1] = -local_mtx[1];
+			local_mtx[2] = -local_mtx[2];
+			local_mtx[3] = -local_mtx[3];
+			out_data = local_mtx;
+		}
+
+		// Decay the follow window after applying. Don't decay on the dhp upload itself
+		// (it just rearmed); decay on every other matrix upload while armed.
+		if (is_mtx && !is_depth_hack_proj && _renderer::mirror_vscf_follow_remaining > 0)
+		{
+			--_renderer::mirror_vscf_follow_remaining;
 		}
 
 		if (_renderer::mirror_dump_active() && pConstantData)

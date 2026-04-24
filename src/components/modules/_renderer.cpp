@@ -6,6 +6,7 @@
 namespace components
 {
 	volatile bool _renderer::mirror_viewmodel_active = false;
+	volatile int  _renderer::mirror_vscf_follow_remaining = 0;
 	volatile int  _renderer::mirror_dump_frames_remaining = 0;
 	int           _renderer::mirror_dump_frame_counter   = 0;
 	static int    s_mirror_log_frame_counter             = 0;
@@ -1487,10 +1488,18 @@ namespace components
 
 		dvars::r_mirrorViewmodel_flipVSCF = game::Dvar_RegisterInt(
 			/* name		*/ "r_mirrorViewmodel_flipVSCF",
-			/* desc		*/ "Flip viewProjection column 0 at VSCF upload (0=off, 1=flip depth-hack projection only, 2=flip all matrix uploads while vm_active). Use in combination with method=0 for pure VSCF mirroring, or with method>0 to catch extra uploads.",
+			/* desc		*/ "Flip viewProjection column 0 at VSCF upload (0=off, 1=flip only the depth-hack proj upload (gun matrix), 2=flip dhp upload + r_mirrorViewmodel_flipFollow following matrix uploads). v8: independent of method/vm_active; gated purely on c2[3] signature.",
 			/* default	*/ 0,
 			/* minVal	*/ 0,
 			/* maxVal	*/ 2,
+			/* flags	*/ game::dvar_flags::saved);
+
+		dvars::r_mirrorViewmodel_flipFollow = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_flipFollow",
+			/* desc		*/ "Number of matrix VSCF uploads after the depth-hack proj to also flip when r_mirrorViewmodel_flipVSCF=2. Catches per-mesh / lighting matrices in the gun draw block. Window disarms on next std-proj upload.",
+			/* default	*/ 32,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 1024,
 			/* flags	*/ game::dvar_flags::saved);
 
 		// increase fps cap to 125 for menus and loadscreen
