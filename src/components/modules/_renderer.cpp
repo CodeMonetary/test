@@ -1506,6 +1506,14 @@ namespace components
 			/* maxVal	*/ 1024,
 			/* flags	*/ game::dvar_flags::saved);
 
+		dvars::r_mirrorViewmodel_flipAxis = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_flipAxis",
+			/* desc		*/ "Which matrix axis to negate when flipVSCF fires. 0=row (negate c0 register = first 4 floats; v8 behavior, doesn't visually mirror). 1=col (negate first element of each register = first row of matrix when stored column-major; this is the actual clip.x output row in D3D9/HLSL default convention). 2=both. 3=full negation (diagnostic: if gun is visibly distorted/invisible, the matrix IS used by gun vs).",
+			/* default	*/ 1,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 3,
+			/* flags	*/ game::dvar_flags::saved);
+
 		// increase fps cap to 125 for menus and loadscreen
 		utils::hook::set<BYTE>(0x500174 + 2, 8);
 		utils::hook::set<BYTE>(0x500177 + 2, 8);

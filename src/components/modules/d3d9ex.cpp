@@ -614,22 +614,20 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetVertexShaderConstantF(UINT StartRegister, CONST float* pConstantData, UINT Vector4fCount)
 	{
-		// r_mirrorViewmodel v8: matrix-upload heuristic.
-		// In IW3, the vertex-shader constant at c0-c3 is transpose(worldViewProjection).
-		// c2[3] ~= -0.1  => depth-hack projection (viewmodel gun pass)
-		// c2[3] ~= -3.998 => standard scene projection (NOT gun)
+		// r_mirrorViewmodel v10: matrix-upload heuristic with selectable flip axis.
+		// v8 negated only c0 register (first 4 floats). User dump confirmed flip
+		// reached GPU during 5 gun draws but gun did NOT mirror visually.
+		// Conclusion: matrix is stored column-major, so c0 register = column 0 of
+		// matrix. Negating c0 scales vertex.x contribution, not clip.x output.
 		//
-		// v7 had two bugs surfaced by user dumps:
-		//   1. flipVSCF was gated on mirror_viewmodel_active, but that flag is only set when
-		//      r_mirrorViewmodel_method != 0. So pure-VSCF mode (method=0, flipVSCF=1) never fired.
-		//   2. Auto-narrow on stdp fired BEFORE the gun pass arrived. Frame order is actually
-		//      SVP -> non-proj VSCF -> stdp(world) -> dhp(gun). Clearing on stdp killed gun.
-		//
-		// v8 fix: flipVSCF is independent of vm_active. Detection is purely per-VSCF c2[3]:
-		//   - mode 1: flip ONLY the depth-hack proj upload itself (the gun matrix).
-		//   - mode 2: flip the dhp upload AND the next r_mirrorViewmodel_flipFollow matrix
-		//             uploads (lighting / per-mesh constants in the same gun draw block).
-		//             The follow window arms on dhp, disarms on stdp.
+		// v10 adds r_mirrorViewmodel_flipAxis:
+		//   0 = row (v8)    - negate c0 register entirely (first row if row-major)
+		//   1 = col (new)   - negate first element of each register (first row if
+		//                     column-major = the clip.x output row). DEFAULT.
+		//   2 = both        - belt-and-suspenders
+		//   3 = full        - negate all 16 floats (diagnostic: if matrix IS used
+		//                     by gun vs, the gun should visibly distort/vanish;
+		//                     if no change, c0-c3 isn't used by gun vs at all)
 		float local_mtx[16];
 		const float* out_data = pConstantData;
 		bool is_mtx = (pConstantData && StartRegister == 0 && Vector4fCount == 4);
@@ -642,6 +640,8 @@ namespace components
 			? dvars::r_mirrorViewmodel_flipVSCF->current.integer : 0;
 		const int flipFollow = dvars::r_mirrorViewmodel_flipFollow
 			? dvars::r_mirrorViewmodel_flipFollow->current.integer : 0;
+		const int flipAxis = dvars::r_mirrorViewmodel_flipAxis
+			? dvars::r_mirrorViewmodel_flipAxis->current.integer : 1;
 
 		if (is_depth_hack_proj)
 		{
@@ -663,10 +663,24 @@ namespace components
 		if (apply_flip)
 		{
 			for (int i = 0; i < 16; ++i) local_mtx[i] = pConstantData[i];
-			local_mtx[0] = -local_mtx[0];
-			local_mtx[1] = -local_mtx[1];
-			local_mtx[2] = -local_mtx[2];
-			local_mtx[3] = -local_mtx[3];
+			if (flipAxis == 0 || flipAxis == 2)
+			{
+				local_mtx[0]  = -local_mtx[0];
+				local_mtx[1]  = -local_mtx[1];
+				local_mtx[2]  = -local_mtx[2];
+				local_mtx[3]  = -local_mtx[3];
+			}
+			if (flipAxis == 1 || flipAxis == 2)
+			{
+				local_mtx[0]  = -local_mtx[0];
+				local_mtx[4]  = -local_mtx[4];
+				local_mtx[8]  = -local_mtx[8];
+				local_mtx[12] = -local_mtx[12];
+			}
+			if (flipAxis == 3)
+			{
+				for (int i = 0; i < 16; ++i) local_mtx[i] = -local_mtx[i];
+			}
 			out_data = local_mtx;
 		}
 
