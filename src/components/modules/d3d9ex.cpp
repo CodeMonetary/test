@@ -118,20 +118,9 @@ namespace components
 	{
 		// r_mirrorViewmodel: clear the viewmodel flag at frame boundary so next
 		// frame's world pass isn't rendered with inverted culling.
+		// NOTE: EndScene owns the dump-frame counter. Some IW3 dispatch paths route
+		// Present() around this wrapper, so relying on it alone drops frame boundaries.
 		_renderer::mirror_viewmodel_active = false;
-
-		// r_mirrorViewmodel dump: one Present() == one frame captured
-		if (_renderer::mirror_dump_frames_remaining > 0)
-		{
-			_renderer::mirror_dump_write("\n=== end of frame %d ===\n",
-				_renderer::mirror_dump_frame_counter);
-			_renderer::mirror_dump_frame_counter++;
-			_renderer::mirror_dump_frames_remaining--;
-			if (_renderer::mirror_dump_frames_remaining == 0)
-			{
-				_renderer::mirror_dump_close();
-			}
-		}
 		return m_pIDirect3DDevice9->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
 	}
 
@@ -282,6 +271,24 @@ namespace components
 		if (components::active.gui)
 		{
 			gui::render_loop();
+		}
+
+		// r_mirrorViewmodel: fallback frame boundary. Some builds route Present() around our
+		// wrapper (observed in mirror_dump_20260424: 0 Present() hits vs 7 BeginScene). EndScene
+		// is always called before Present and always reaches our wrapper, so it is a reliable
+		// per-frame hook. Reset the viewmodel flag here too, and advance the dump counter.
+		_renderer::mirror_viewmodel_active = false;
+
+		if (_renderer::mirror_dump_frames_remaining > 0)
+		{
+			_renderer::mirror_dump_write("\n=== end of frame %d (EndScene) ===\n",
+				_renderer::mirror_dump_frame_counter);
+			_renderer::mirror_dump_frame_counter++;
+			_renderer::mirror_dump_frames_remaining--;
+			if (_renderer::mirror_dump_frames_remaining == 0)
+			{
+				_renderer::mirror_dump_close();
+			}
 		}
 
 		return m_pIDirect3DDevice9->EndScene();
@@ -592,23 +599,69 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetVertexShaderConstantF(UINT StartRegister, CONST float* pConstantData, UINT Vector4fCount)
 	{
+		// r_mirrorViewmodel: matrix-upload heuristic.
+		// In IW3, the vertex-shader constant at c0-c3 is transpose(worldViewProjection).
+		// c2[3] ~= -0.1  => depth-hack projection (viewmodel gun pass)
+		// c2[3] ~= -3.998 => standard scene projection (NOT gun; 3D effects after gun)
+		// We use c2[3] to (a) bound the vm_active window and (b) selectively flip the gun matrix in-shader.
+		float local_mtx[16];
+		const float* out_data = pConstantData;
+		bool is_mtx = (pConstantData && StartRegister == 0 && Vector4fCount == 4);
+		float c23 = 0.0f;
+		if (is_mtx) { c23 = pConstantData[11]; } // c2[3]
+		const bool is_depth_hack_proj = is_mtx && (c23 < -0.02f && c23 > -0.50f);
+		const bool is_std_proj        = is_mtx && (c23 < -1.00f);
+
+		// Narrow the vm_active window: when a standard projection matrix is uploaded
+		// while vm_active is true, we are past the gun pass (entering 3D fx/tracers/decals).
+		// Clear the flag so those draws are not flagged as viewmodel.
+		if (_renderer::mirror_viewmodel_active && is_std_proj)
+		{
+			_renderer::mirror_viewmodel_active = false;
+		}
+
+		const int flipVSCF = dvars::r_mirrorViewmodel_flipVSCF
+			? dvars::r_mirrorViewmodel_flipVSCF->current.integer : 0;
+
+		// When vm_active and flipVSCF enabled, negate the first register (column 0 of the
+		// transposed viewProj). This flips clip-space X for every shader that mul()s
+		// vertex positions against c0-c3 -- catches both of the engine's two upload paths
+		// that produce the inconsistent mirror (12 flipped vs 113 non-flipped in dumps).
+		if (is_mtx && _renderer::mirror_viewmodel_active && flipVSCF != 0)
+		{
+			bool apply = false;
+			if (flipVSCF == 1 && is_depth_hack_proj) apply = true;
+			if (flipVSCF == 2)                      apply = true;
+			if (apply)
+			{
+				for (int i = 0; i < 16; ++i) local_mtx[i] = pConstantData[i];
+				local_mtx[0] = -local_mtx[0];
+				local_mtx[1] = -local_mtx[1];
+				local_mtx[2] = -local_mtx[2];
+				local_mtx[3] = -local_mtx[3];
+				out_data = local_mtx;
+			}
+		}
+
 		if (_renderer::mirror_dump_active() && pConstantData)
 		{
 			mirror_dump_inc_vscf();
 			_renderer::mirror_dump_write(
-				"  VSCF start=%u count=%u vm_active=%d\n",
-				StartRegister, Vector4fCount, (int)_renderer::mirror_viewmodel_active);
+				"  VSCF start=%u count=%u vm_active=%d flip=%d dhp=%d stdp=%d\n",
+				StartRegister, Vector4fCount, (int)_renderer::mirror_viewmodel_active,
+				(out_data != pConstantData) ? 1 : 0,
+				(int)is_depth_hack_proj, (int)is_std_proj);
 			const UINT rows = (Vector4fCount > 16) ? 16 : Vector4fCount;
 			for (UINT i = 0; i < rows; ++i)
 			{
 				_renderer::mirror_dump_write(
 					"    c%3u : % .6f  % .6f  % .6f  % .6f\n",
 					StartRegister + i,
-					pConstantData[i*4+0], pConstantData[i*4+1],
-					pConstantData[i*4+2], pConstantData[i*4+3]);
+					out_data[i*4+0], out_data[i*4+1],
+					out_data[i*4+2], out_data[i*4+3]);
 			}
 		}
-		return m_pIDirect3DDevice9->SetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount);
+		return m_pIDirect3DDevice9->SetVertexShaderConstantF(StartRegister, out_data, Vector4fCount);
 	}
 
 	HRESULT d3d9ex::D3D9Device::GetVertexShaderConstantF(UINT StartRegister, float* pConstantData, UINT Vector4fCount)

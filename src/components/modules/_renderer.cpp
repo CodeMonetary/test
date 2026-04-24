@@ -1485,6 +1485,14 @@ namespace components
 			/* maxVal	*/ 2,
 			/* flags	*/ game::dvar_flags::none);
 
+		dvars::r_mirrorViewmodel_flipVSCF = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_flipVSCF",
+			/* desc		*/ "Flip viewProjection column 0 at VSCF upload (0=off, 1=flip depth-hack projection only, 2=flip all matrix uploads while vm_active). Use in combination with method=0 for pure VSCF mirroring, or with method>0 to catch extra uploads.",
+			/* default	*/ 0,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 2,
+			/* flags	*/ game::dvar_flags::saved);
+
 		// increase fps cap to 125 for menus and loadscreen
 		utils::hook::set<BYTE>(0x500174 + 2, 8);
 		utils::hook::set<BYTE>(0x500177 + 2, 8);
