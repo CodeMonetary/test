@@ -1,9 +1,153 @@
 #include "std_include.hpp"
+#include <cstdio>
+#include <cstdarg>
+#include <ctime>
 
 namespace components
 {
 	volatile bool _renderer::mirror_viewmodel_active = false;
-	static int s_mirror_log_frame_counter = 0;
+	volatile int  _renderer::mirror_dump_frames_remaining = 0;
+	int           _renderer::mirror_dump_frame_counter   = 0;
+	static int    s_mirror_log_frame_counter             = 0;
+	static FILE*  s_mirror_dump_file                      = nullptr;
+	static char   s_mirror_dump_path[512]                 = {0};
+	static int    s_mirror_dump_rs_count                  = 0;
+	static int    s_mirror_dump_vscf_count                = 0;
+	static int    s_mirror_dump_pscf_count                = 0;
+
+	bool _renderer::mirror_dump_active()
+	{
+		return s_mirror_dump_file != nullptr && mirror_dump_frames_remaining > 0;
+	}
+
+	void _renderer::mirror_dump_write(const char* fmt, ...)
+	{
+		if (!s_mirror_dump_file) return;
+		va_list va; va_start(va, fmt);
+		vfprintf(s_mirror_dump_file, fmt, va);
+		va_end(va);
+	}
+
+	void _renderer::mirror_dump_open(int frames)
+	{
+		if (s_mirror_dump_file) { fclose(s_mirror_dump_file); s_mirror_dump_file = nullptr; }
+
+		const auto* base = game::Dvar_FindVar("fs_basepath");
+		const char* basepath = (base && base->current.string) ? base->current.string : ".";
+		std::time_t t = std::time(nullptr);
+		std::tm lt; localtime_s(&lt, &t);
+		std::snprintf(s_mirror_dump_path, sizeof(s_mirror_dump_path),
+			"%s\\main\\mirror_dump_%04d%02d%02d_%02d%02d%02d.txt",
+			basepath,
+			1900 + lt.tm_year, 1 + lt.tm_mon, lt.tm_mday,
+			lt.tm_hour, lt.tm_min, lt.tm_sec);
+		fopen_s(&s_mirror_dump_file, s_mirror_dump_path, "w");
+		if (s_mirror_dump_file) setvbuf(s_mirror_dump_file, nullptr, _IONBF, 0);
+		if (!s_mirror_dump_file)
+		{
+			game::Com_PrintMessage(0, utils::va("[mirror_dump] FAILED to open %s\n", s_mirror_dump_path), 0);
+			mirror_dump_frames_remaining = 0;
+			return;
+		}
+		mirror_dump_frame_counter = 0;
+		s_mirror_dump_rs_count = 0;
+		s_mirror_dump_vscf_count = 0;
+		s_mirror_dump_pscf_count = 0;
+		mirror_dump_frames_remaining = frames;
+
+		const int method = dvars::r_mirrorViewmodel_method ? dvars::r_mirrorViewmodel_method->current.integer : 0;
+		const int cfix   = dvars::r_mirrorViewmodel_cullFix ? dvars::r_mirrorViewmodel_cullFix->current.integer : 0;
+		fprintf(s_mirror_dump_file,
+			"=== iw3xo r_mirrorViewmodel dump ===\n"
+			"time        : %04d-%02d-%02d %02d:%02d:%02d\n"
+			"frames      : %d (requested)\n"
+			"method      : %d\n"
+			"cullFix     : %d\n"
+			"=============================================\n\n",
+			1900 + lt.tm_year, 1 + lt.tm_mon, lt.tm_mday,
+			lt.tm_hour, lt.tm_min, lt.tm_sec,
+			frames, method, cfix);
+		fflush(s_mirror_dump_file);
+
+		game::Com_PrintMessage(0, utils::va("[mirror_dump] capturing %d frame(s) -> %s\n", frames, s_mirror_dump_path), 0);
+	}
+
+	void _renderer::mirror_dump_close()
+	{
+		if (!s_mirror_dump_file) return;
+		fprintf(s_mirror_dump_file,
+			"\n=== summary ===\n"
+			"SetRenderState calls     : %d\n"
+			"SetVertexShaderConstantF : %d\n"
+			"SetPixelShaderConstantF  : %d\n",
+			s_mirror_dump_rs_count, s_mirror_dump_vscf_count, s_mirror_dump_pscf_count);
+		fclose(s_mirror_dump_file);
+		s_mirror_dump_file = nullptr;
+		mirror_dump_frames_remaining = 0;
+		game::Com_PrintMessage(0, utils::va("[mirror_dump] finished -> %s\n", s_mirror_dump_path), 0);
+	}
+
+	const char* _renderer::mirror_dump_renderstate_name(unsigned int s)
+	{
+		switch (s) {
+		case D3DRS_ZENABLE:              return "ZENABLE";
+		case D3DRS_FILLMODE:             return "FILLMODE";
+		case D3DRS_SHADEMODE:            return "SHADEMODE";
+		case D3DRS_ZWRITEENABLE:         return "ZWRITEENABLE";
+		case D3DRS_ALPHATESTENABLE:      return "ALPHATESTENABLE";
+		case D3DRS_LASTPIXEL:            return "LASTPIXEL";
+		case D3DRS_SRCBLEND:             return "SRCBLEND";
+		case D3DRS_DESTBLEND:            return "DESTBLEND";
+		case D3DRS_CULLMODE:             return "CULLMODE";
+		case D3DRS_ZFUNC:                return "ZFUNC";
+		case D3DRS_ALPHAREF:             return "ALPHAREF";
+		case D3DRS_ALPHAFUNC:            return "ALPHAFUNC";
+		case D3DRS_DITHERENABLE:         return "DITHERENABLE";
+		case D3DRS_ALPHABLENDENABLE:     return "ALPHABLENDENABLE";
+		case D3DRS_FOGENABLE:            return "FOGENABLE";
+		case D3DRS_SPECULARENABLE:       return "SPECULARENABLE";
+		case D3DRS_FOGCOLOR:             return "FOGCOLOR";
+		case D3DRS_STENCILENABLE:        return "STENCILENABLE";
+		case D3DRS_STENCILFUNC:          return "STENCILFUNC";
+		case D3DRS_STENCILREF:           return "STENCILREF";
+		case D3DRS_STENCILMASK:          return "STENCILMASK";
+		case D3DRS_STENCILWRITEMASK:     return "STENCILWRITEMASK";
+		case D3DRS_TEXTUREFACTOR:        return "TEXTUREFACTOR";
+		case D3DRS_CLIPPING:             return "CLIPPING";
+		case D3DRS_LIGHTING:             return "LIGHTING";
+		case D3DRS_AMBIENT:              return "AMBIENT";
+		case D3DRS_COLORVERTEX:          return "COLORVERTEX";
+		case D3DRS_NORMALIZENORMALS:     return "NORMALIZENORMALS";
+		case D3DRS_CLIPPLANEENABLE:      return "CLIPPLANEENABLE";
+		case D3DRS_POINTSIZE:            return "POINTSIZE";
+		case D3DRS_MULTISAMPLEANTIALIAS: return "MULTISAMPLEANTIALIAS";
+		case D3DRS_MULTISAMPLEMASK:      return "MULTISAMPLEMASK";
+		case D3DRS_COLORWRITEENABLE:     return "COLORWRITEENABLE";
+		case D3DRS_BLENDOP:              return "BLENDOP";
+		case D3DRS_SCISSORTESTENABLE:    return "SCISSORTESTENABLE";
+		case D3DRS_SLOPESCALEDEPTHBIAS:  return "SLOPESCALEDEPTHBIAS";
+		case D3DRS_TWOSIDEDSTENCILMODE:  return "TWOSIDEDSTENCILMODE";
+		case D3DRS_CCW_STENCILFAIL:      return "CCW_STENCILFAIL";
+		case D3DRS_CCW_STENCILZFAIL:     return "CCW_STENCILZFAIL";
+		case D3DRS_CCW_STENCILPASS:      return "CCW_STENCILPASS";
+		case D3DRS_CCW_STENCILFUNC:      return "CCW_STENCILFUNC";
+		case D3DRS_COLORWRITEENABLE1:    return "COLORWRITEENABLE1";
+		case D3DRS_COLORWRITEENABLE2:    return "COLORWRITEENABLE2";
+		case D3DRS_COLORWRITEENABLE3:    return "COLORWRITEENABLE3";
+		case D3DRS_BLENDFACTOR:          return "BLENDFACTOR";
+		case D3DRS_SRGBWRITEENABLE:      return "SRGBWRITEENABLE";
+		case D3DRS_DEPTHBIAS:            return "DEPTHBIAS";
+		case D3DRS_SEPARATEALPHABLENDENABLE:return "SEPARATEALPHABLENDENABLE";
+		case D3DRS_SRCBLENDALPHA:        return "SRCBLENDALPHA";
+		case D3DRS_DESTBLENDALPHA:       return "DESTBLENDALPHA";
+		case D3DRS_BLENDOPALPHA:         return "BLENDOPALPHA";
+		default:                          return "?";
+		}
+	}
+
+	void mirror_dump_inc_rs()   { s_mirror_dump_rs_count++; }
+	void mirror_dump_inc_vscf() { s_mirror_dump_vscf_count++; }
+	void mirror_dump_inc_pscf() { s_mirror_dump_pscf_count++; }
 
 	/* ---------------------------------------------------------- */
 	/* ------------ create dynamic rendering buffers ------------ */
@@ -1055,6 +1199,42 @@ namespace components
 		}
 		s_mirror_log_frame_counter++;
 
+		// --- r_mirrorViewmodel dump: print full GfxViewParms BEFORE modification ---
+		if (_renderer::mirror_dump_active())
+		{
+			_renderer::mirror_dump_write(
+				"\n--- SVP call @ frame %d ---\n"
+				"  depthHackNearClip=%.6f  zNear=%.6f  zFar=%.3f\n"
+				"  origin=(%.3f %.3f %.3f)\n"
+				"  axis[0]=(%.6f %.6f %.6f)\n"
+				"  axis[1]=(%.6f %.6f %.6f)\n"
+				"  axis[2]=(%.6f %.6f %.6f)\n",
+				_renderer::mirror_dump_frame_counter,
+				view_parms->depthHackNearClip, view_parms->zNear, view_parms->zFar,
+				view_parms->origin[0], view_parms->origin[1], view_parms->origin[2],
+				view_parms->axis[0][0], view_parms->axis[0][1], view_parms->axis[0][2],
+				view_parms->axis[1][0], view_parms->axis[1][1], view_parms->axis[1][2],
+				view_parms->axis[2][0], view_parms->axis[2][1], view_parms->axis[2][2]);
+
+			_renderer::mirror_dump_write("  view (before):\n");
+			for (int r = 0; r < 4; ++r) _renderer::mirror_dump_write(
+				"    % .6f  % .6f  % .6f  % .6f\n",
+				view_parms->viewMatrix.m[r][0], view_parms->viewMatrix.m[r][1],
+				view_parms->viewMatrix.m[r][2], view_parms->viewMatrix.m[r][3]);
+
+			_renderer::mirror_dump_write("  proj (before):\n");
+			for (int r = 0; r < 4; ++r) _renderer::mirror_dump_write(
+				"    % .6f  % .6f  % .6f  % .6f\n",
+				view_parms->projectionMatrix.m[r][0], view_parms->projectionMatrix.m[r][1],
+				view_parms->projectionMatrix.m[r][2], view_parms->projectionMatrix.m[r][3]);
+
+			_renderer::mirror_dump_write("  viewProj (before):\n");
+			for (int r = 0; r < 4; ++r) _renderer::mirror_dump_write(
+				"    % .6f  % .6f  % .6f  % .6f\n",
+				view_parms->viewProjectionMatrix.m[r][0], view_parms->viewProjectionMatrix.m[r][1],
+				view_parms->viewProjectionMatrix.m[r][2], view_parms->viewProjectionMatrix.m[r][3]);
+		}
+
 		// Determine if this call is for the viewmodel scene
 		const bool is_viewmodel_dhnc = (view_parms->depthHackNearClip != 0.0f);
 		const bool is_viewmodel_znear = (view_parms->zNear > 0.0f && view_parms->zNear < 1.0f);
@@ -1132,6 +1312,32 @@ namespace components
 			game::Com_PrintMessage(0, utils::va(
 				"[mirror] APPLIED method=%d  dhnc=%.4f  zNear=%.4f\n",
 				method, view_parms->depthHackNearClip, view_parms->zNear), 0);
+		}
+
+		// --- r_mirrorViewmodel dump: print GfxViewParms AFTER modification ---
+		if (_renderer::mirror_dump_active())
+		{
+			_renderer::mirror_dump_write(
+				"  -> method=%d  gate=%d  active=%d\n",
+				method, (int)gate, (int)_renderer::mirror_viewmodel_active);
+
+			_renderer::mirror_dump_write("  view (after):\n");
+			for (int r = 0; r < 4; ++r) _renderer::mirror_dump_write(
+				"    % .6f  % .6f  % .6f  % .6f\n",
+				view_parms->viewMatrix.m[r][0], view_parms->viewMatrix.m[r][1],
+				view_parms->viewMatrix.m[r][2], view_parms->viewMatrix.m[r][3]);
+
+			_renderer::mirror_dump_write("  proj (after):\n");
+			for (int r = 0; r < 4; ++r) _renderer::mirror_dump_write(
+				"    % .6f  % .6f  % .6f  % .6f\n",
+				view_parms->projectionMatrix.m[r][0], view_parms->projectionMatrix.m[r][1],
+				view_parms->projectionMatrix.m[r][2], view_parms->projectionMatrix.m[r][3]);
+
+			_renderer::mirror_dump_write("  viewProj (after):\n");
+			for (int r = 0; r < 4; ++r) _renderer::mirror_dump_write(
+				"    % .6f  % .6f  % .6f  % .6f\n",
+				view_parms->viewProjectionMatrix.m[r][0], view_parms->viewProjectionMatrix.m[r][1],
+				view_parms->viewProjectionMatrix.m[r][2], view_parms->viewProjectionMatrix.m[r][3]);
 		}
 	}
 	
@@ -1283,6 +1489,18 @@ namespace components
 		utils::hook::set<BYTE>(0x500174 + 2, 8);
 		utils::hook::set<BYTE>(0x500177 + 2, 8);
 
+
+		command::add("mirror_dump", "<frames>", "Capture <frames> frames of full mirror diagnostics to main/mirror_dump_<timestamp>.txt (default 3). Suggested bind: /bind F10 \"mirror_dump 3\".", [](command::params params)
+		{
+			int frames = 3;
+			if (params.length() >= 2)
+			{
+				frames = atoi(params[1]);
+				if (frames < 1)   frames = 1;
+				if (frames > 120) frames = 120;
+			}
+			_renderer::mirror_dump_open(frames);
+		});
 
 		command::add("dumpreflections", "", "", [this](command::params)
 		{

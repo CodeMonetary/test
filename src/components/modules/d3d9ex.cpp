@@ -3,6 +3,11 @@
 
 namespace components
 {
+	// r_mirrorViewmodel dump counters (defined in _renderer.cpp)
+	extern void mirror_dump_inc_rs();
+	extern void mirror_dump_inc_vscf();
+	extern void mirror_dump_inc_pscf();
+
 #pragma region D3D9Device
 
 	HRESULT d3d9ex::D3D9Device::QueryInterface(REFIID riid, void** ppvObj)
@@ -114,6 +119,19 @@ namespace components
 		// r_mirrorViewmodel: clear the viewmodel flag at frame boundary so next
 		// frame's world pass isn't rendered with inverted culling.
 		_renderer::mirror_viewmodel_active = false;
+
+		// r_mirrorViewmodel dump: one Present() == one frame captured
+		if (_renderer::mirror_dump_frames_remaining > 0)
+		{
+			_renderer::mirror_dump_write("\n=== end of frame %d ===\n",
+				_renderer::mirror_dump_frame_counter);
+			_renderer::mirror_dump_frame_counter++;
+			_renderer::mirror_dump_frames_remaining--;
+			if (_renderer::mirror_dump_frames_remaining == 0)
+			{
+				_renderer::mirror_dump_close();
+			}
+		}
 		return m_pIDirect3DDevice9->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
 	}
 
@@ -250,6 +268,12 @@ namespace components
 		// r_mirrorViewmodel: belt-and-suspenders; ensure flag is clear at frame start
 		// so the world pass (first after BeginScene) renders with normal culling.
 		_renderer::mirror_viewmodel_active = false;
+
+		if (_renderer::mirror_dump_active())
+		{
+			_renderer::mirror_dump_write("\n=== BEGIN frame %d (BeginScene) ===\n",
+				_renderer::mirror_dump_frame_counter);
+		}
 		return m_pIDirect3DDevice9->BeginScene();
 	}
 
@@ -335,6 +359,9 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetRenderState(D3DRENDERSTATETYPE State, DWORD Value)
 	{
+		const DWORD original_value = Value;
+		bool swapped = false;
+
 		// r_mirrorViewmodel: when the viewmodel projection is horizontally flipped,
 		// screen-space winding order is reversed. Invert CULLMODE while
 		// mirror_viewmodel_active so front faces stay visible. Gated by
@@ -346,26 +373,17 @@ namespace components
 			const int cull_mode = dvars::r_mirrorViewmodel_cullFix
 				? dvars::r_mirrorViewmodel_cullFix->current.integer : 0;
 
-			const DWORD original_value = Value;
-			bool swapped = false;
 			if (_renderer::mirror_viewmodel_active && cull_mode != 0)
 			{
 				switch (cull_mode)
 				{
-				case 1: // swap CW<->CCW, leave NONE alone
+				case 1:
 					if (Value == D3DCULL_CW)       { Value = D3DCULL_CCW; swapped = true; }
 					else if (Value == D3DCULL_CCW) { Value = D3DCULL_CW;  swapped = true; }
 					break;
-				case 2: // force CCW (also overrides NONE); handles the case where game
-					// draws viewmodel with CULL_NONE so winding-inversion has no effect.
-					if (Value != D3DCULL_CCW) { Value = D3DCULL_CCW; swapped = true; }
-					break;
-				case 3: // force CW (opposite, for comparison)
-					if (Value != D3DCULL_CW) { Value = D3DCULL_CW; swapped = true; }
-					break;
-				case 4: // force NONE (no culling on viewmodel while mirrored)
-					if (Value != D3DCULL_NONE) { Value = D3DCULL_NONE; swapped = true; }
-					break;
+				case 2: if (Value != D3DCULL_CCW)  { Value = D3DCULL_CCW;  swapped = true; } break;
+				case 3: if (Value != D3DCULL_CW)   { Value = D3DCULL_CW;   swapped = true; } break;
+				case 4: if (Value != D3DCULL_NONE) { Value = D3DCULL_NONE; swapped = true; } break;
 				}
 			}
 
@@ -376,6 +394,17 @@ namespace components
 					original_value, Value, (int)_renderer::mirror_viewmodel_active,
 					cull_mode, (int)swapped), 0);
 			}
+		}
+
+		// r_mirrorViewmodel dump: log every SetRenderState call with its decoded name.
+		if (_renderer::mirror_dump_active())
+		{
+			mirror_dump_inc_rs();
+			_renderer::mirror_dump_write(
+				"  RS  %-28s (%3u) = %10u  vm_active=%d  swapped=%d\n",
+				_renderer::mirror_dump_renderstate_name((unsigned)State),
+				(unsigned)State, (unsigned)Value,
+				(int)_renderer::mirror_viewmodel_active, (int)swapped);
 		}
 
 		return m_pIDirect3DDevice9->SetRenderState(State, Value);
@@ -563,6 +592,22 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetVertexShaderConstantF(UINT StartRegister, CONST float* pConstantData, UINT Vector4fCount)
 	{
+		if (_renderer::mirror_dump_active() && pConstantData)
+		{
+			mirror_dump_inc_vscf();
+			_renderer::mirror_dump_write(
+				"  VSCF start=%u count=%u vm_active=%d\n",
+				StartRegister, Vector4fCount, (int)_renderer::mirror_viewmodel_active);
+			const UINT rows = (Vector4fCount > 16) ? 16 : Vector4fCount;
+			for (UINT i = 0; i < rows; ++i)
+			{
+				_renderer::mirror_dump_write(
+					"    c%3u : % .6f  % .6f  % .6f  % .6f\n",
+					StartRegister + i,
+					pConstantData[i*4+0], pConstantData[i*4+1],
+					pConstantData[i*4+2], pConstantData[i*4+3]);
+			}
+		}
 		return m_pIDirect3DDevice9->SetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount);
 	}
 
@@ -644,6 +689,23 @@ namespace components
 		{
 			//Logger::Print("Invalid shader constant array!\n");
 			return D3DERR_INVALIDCALL;
+		}
+
+		if (_renderer::mirror_dump_active() && pConstantData)
+		{
+			mirror_dump_inc_pscf();
+			_renderer::mirror_dump_write(
+				"  PSCF start=%u count=%u vm_active=%d\n",
+				StartRegister, Vector4fCount, (int)_renderer::mirror_viewmodel_active);
+			const UINT rows = (Vector4fCount > 8) ? 8 : Vector4fCount;
+			for (UINT i = 0; i < rows; ++i)
+			{
+				_renderer::mirror_dump_write(
+					"    c%3u : % .6f  % .6f  % .6f  % .6f\n",
+					StartRegister + i,
+					pConstantData[i*4+0], pConstantData[i*4+1],
+					pConstantData[i*4+2], pConstantData[i*4+3]);
+			}
 		}
 
 		return m_pIDirect3DDevice9->SetPixelShaderConstantF(StartRegister, pConstantData, Vector4fCount);
