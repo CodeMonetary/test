@@ -7,6 +7,7 @@ namespace components
 	extern void mirror_dump_inc_rs();
 	extern void mirror_dump_inc_vscf();
 	extern void mirror_dump_inc_pscf();
+	extern void mirror_dump_inc_draw();
 
 #pragma region D3D9Device
 
@@ -534,11 +535,25 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::DrawPrimitive(D3DPRIMITIVETYPE PrimitiveType, UINT StartVertex, UINT PrimitiveCount)
 	{
+		if (_renderer::mirror_dump_active())
+		{
+			mirror_dump_inc_draw();
+			_renderer::mirror_dump_write(
+				"  DRAW raw prim=%u  follow=%d\n",
+				PrimitiveCount, _renderer::mirror_vscf_follow_remaining);
+		}
 		return m_pIDirect3DDevice9->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
 	}
 
 	HRESULT d3d9ex::D3D9Device::DrawIndexedPrimitive(D3DPRIMITIVETYPE PrimitiveType, INT BaseVertexIndex, UINT MinVertexIndex, UINT NumVertices, UINT startIndex, UINT primCount)
 	{
+		if (_renderer::mirror_dump_active())
+		{
+			mirror_dump_inc_draw();
+			_renderer::mirror_dump_write(
+				"  DRAW idx prim=%u nverts=%u  follow=%d\n",
+				primCount, NumVertices, _renderer::mirror_vscf_follow_remaining);
+		}
 		return m_pIDirect3DDevice9->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
 	}
 

@@ -15,6 +15,7 @@ namespace components
 	static int    s_mirror_dump_rs_count                  = 0;
 	static int    s_mirror_dump_vscf_count                = 0;
 	static int    s_mirror_dump_pscf_count                = 0;
+	static int    s_mirror_dump_draw_count                = 0;
 
 	bool _renderer::mirror_dump_active()
 	{
@@ -54,6 +55,7 @@ namespace components
 		s_mirror_dump_rs_count = 0;
 		s_mirror_dump_vscf_count = 0;
 		s_mirror_dump_pscf_count = 0;
+		s_mirror_dump_draw_count = 0;
 		mirror_dump_frames_remaining = frames;
 
 		const int method = dvars::r_mirrorViewmodel_method ? dvars::r_mirrorViewmodel_method->current.integer : 0;
@@ -80,8 +82,9 @@ namespace components
 			"\n=== summary ===\n"
 			"SetRenderState calls     : %d\n"
 			"SetVertexShaderConstantF : %d\n"
-			"SetPixelShaderConstantF  : %d\n",
-			s_mirror_dump_rs_count, s_mirror_dump_vscf_count, s_mirror_dump_pscf_count);
+			"SetPixelShaderConstantF  : %d\n"
+			"DrawPrim/IndexedPrim     : %d\n",
+			s_mirror_dump_rs_count, s_mirror_dump_vscf_count, s_mirror_dump_pscf_count, s_mirror_dump_draw_count);
 		fclose(s_mirror_dump_file);
 		s_mirror_dump_file = nullptr;
 		mirror_dump_frames_remaining = 0;
@@ -149,6 +152,7 @@ namespace components
 	void mirror_dump_inc_rs()   { s_mirror_dump_rs_count++; }
 	void mirror_dump_inc_vscf() { s_mirror_dump_vscf_count++; }
 	void mirror_dump_inc_pscf() { s_mirror_dump_pscf_count++; }
+	void mirror_dump_inc_draw() { s_mirror_dump_draw_count++; }
 
 	/* ---------------------------------------------------------- */
 	/* ------------ create dynamic rendering buffers ------------ */
