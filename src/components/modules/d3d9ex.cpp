@@ -38,14 +38,6 @@ namespace components
 		static int  g_h                          = 0;
 		static bool g_pass_active                = false; // first dhp seen this frame; cleared after final composite
 		static bool g_in_segment                 = false; // off-screen RT currently bound
-		static int  g_segments_done              = 0;     // completed dhp/stdp pairs this frame
-
-		// IW3 viewmodel = exactly two segments per frame: z-prefill + lit pass.
-		// Other depth-hack proj uploads (3D HUD overlays, compass needle, kill-cam
-		// markers, etc.) re-use the same c2[3] near-clip range and would otherwise
-		// be picked up by our dhp signature, redirecting world+HUD draws into our
-		// off-screen RT and producing a fully-mirrored screen. Cap at 2 segments.
-		static constexpr int kMaxSegmentsPerFrame = 2;
 
 		static void release_targets()
 		{
@@ -79,7 +71,6 @@ namespace components
 		static void begin_segment(IDirect3DDevice9* dev)
 		{
 			if (g_in_segment) return;
-			if (g_segments_done >= kMaxSegmentsPerFrame) return; // ignore non-viewmodel dhp uploads
 			if (!ensure_targets(dev)) return;
 			if (FAILED(dev->GetRenderTarget(0, &g_saved_color))) { g_saved_color = nullptr; return; }
 			if (FAILED(dev->GetDepthStencilSurface(&g_saved_depth))) { g_saved_depth = nullptr; }
@@ -101,7 +92,6 @@ namespace components
 		{
 			if (!g_in_segment) return;
 			g_in_segment = false;
-			g_segments_done++;
 			if (g_saved_color) { dev->SetRenderTarget(0, g_saved_color); g_saved_color->Release(); g_saved_color = nullptr; }
 			if (g_saved_depth) { dev->SetDepthStencilSurface(g_saved_depth); g_saved_depth->Release(); g_saved_depth = nullptr; }
 			else                 dev->SetDepthStencilSurface(nullptr);
@@ -112,7 +102,6 @@ namespace components
 			if (g_in_segment) end_segment(dev); // safety net (no stdp seen before EndScene)
 			if (!g_pass_active) return;
 			g_pass_active   = false;
-			g_segments_done = 0;
 
 			// v14: capture ALL device state in a state block. After the composite we
 			// Apply() the block which restores every render state, texture stage,
@@ -207,7 +196,6 @@ namespace components
 			if (g_saved_depth) { g_saved_depth->Release(); g_saved_depth = nullptr; }
 			g_pass_active   = false;
 			g_in_segment    = false;
-			g_segments_done = 0;
 			release_targets();
 		}
 	}
@@ -883,7 +871,12 @@ namespace components
 			{
 				mirror_rtt::begin_segment(m_pIDirect3DDevice9);
 			}
-			else if (is_std_proj && mirror_rtt::g_in_segment)
+			// v17: end the segment on ANY non-dhp 4-row c0-c3 matrix upload, not just
+			// the world std-proj signature. The iron-sight reticle pass uses a third
+			// dhp matrix and is followed by an identity matrix upload (2D HUD setup,
+			// c2[3]=1.0) - that is neither dhp nor stdp, so v15-v16's stdp-only check
+			// missed it and the segment stayed open across the entire 2D HUD pass.
+			else if (is_mtx_at_zero && mirror_rtt::g_in_segment)
 			{
 				mirror_rtt::end_segment(m_pIDirect3DDevice9);
 			}
