@@ -143,7 +143,17 @@ namespace components
 			dev->SetRenderState(D3DRS_CULLMODE,         D3DCULL_NONE);
 			dev->SetRenderState(D3DRS_LIGHTING,         FALSE);
 			dev->SetRenderState(D3DRS_FOGENABLE,        FALSE);
-			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,  FALSE);
+			// v24: gamma encoding for the composite. The engine's tonemap pass
+			// bakes an sRGB-like curve into the back-buffer; the gun bypasses
+			// that pass and pasting linear gun pixels straight onto the encoded
+			// bb yields a slightly warm/desaturated 'sandy' tint. Encoding the
+			// composite write (SRGBWRITE=TRUE) brings the gun in line with the
+			// world. See r_mirrorViewmodel_compositeSrgb for details.
+			const int srgb_mode = dvars::r_mirrorViewmodel_compositeSrgb
+				? dvars::r_mirrorViewmodel_compositeSrgb->current.integer : 1;
+			const BOOL srgb_read  = (srgb_mode == 2 || srgb_mode == 3) ? TRUE : FALSE;
+			const BOOL srgb_write = (srgb_mode == 1 || srgb_mode == 3) ? TRUE : FALSE;
+			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,  srgb_write);
 			dev->SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE);
 			dev->SetRenderState(D3DRS_COLORWRITEENABLE,
 				D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN |
@@ -194,6 +204,7 @@ namespace components
 			dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
 			dev->SetSamplerState(0, D3DSAMP_ADDRESSU,  D3DTADDRESS_CLAMP);
 			dev->SetSamplerState(0, D3DSAMP_ADDRESSV,  D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, srgb_read);
 			dev->SetTexture(0, g_tex);
 			dev->SetVertexDeclaration(nullptr);
 			dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);

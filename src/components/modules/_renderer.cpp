@@ -1546,6 +1546,14 @@ namespace components
 			/* maxVal	*/ 2,
 			/* flags	*/ game::dvar_flags::saved);
 
+		dvars::r_mirrorViewmodel_compositeSrgb = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_compositeSrgb",
+			/* desc		*/ "v24: gamma encoding for the off-screen viewmodel composite. The engine renders the world with a tonemap pass that bakes an sRGB-like gamma curve into the back-buffer; the gun is rendered to a plain off-screen RT and bypasses that pass, which produces a slightly warm/desaturated 'sandy' tint when the linear gun pixels are written straight onto the gamma-encoded back-buffer. Modes select sampler/renderstate sRGB flags during composite. 0 = SRGBTEXTURE=0, SRGBWRITE=0 (legacy, raw linear -> raw bb, sandy tint). 1 = SRGBTEXTURE=0, SRGBWRITE=1 (linear -> hardware sRGB encode on write, default). 2 = SRGBTEXTURE=1, SRGBWRITE=0 (sRGB sample -> raw write). 3 = SRGBTEXTURE=1, SRGBWRITE=1 (sRGB sample -> sRGB write).",
+			/* default	*/ 1,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 3,
+			/* flags	*/ game::dvar_flags::saved);
+
 		// increase fps cap to 125 for menus and loadscreen
 		utils::hook::set<BYTE>(0x500174 + 2, 8);
 		utils::hook::set<BYTE>(0x500177 + 2, 8);
