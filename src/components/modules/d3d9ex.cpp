@@ -38,6 +38,7 @@ namespace components
 		static int  g_h                          = 0;
 		static bool g_pass_active                = false; // first dhp seen this frame; cleared after final composite
 		static bool g_in_segment                 = false; // off-screen RT currently bound
+		static bool g_pending_early_composite    = false; // v22: set on PSCF c7 fingerprint, fires AFTER the next draw (the engine's final tonemap-output) instead of before it
 
 		static void release_targets()
 		{
@@ -222,8 +223,9 @@ namespace components
 		{
 			if (g_saved_color) { g_saved_color->Release(); g_saved_color = nullptr; }
 			if (g_saved_depth) { g_saved_depth->Release(); g_saved_depth = nullptr; }
-			g_pass_active   = false;
-			g_in_segment    = false;
+			g_pass_active            = false;
+			g_in_segment             = false;
+			g_pending_early_composite = false;
 			release_targets();
 		}
 	}
@@ -773,7 +775,17 @@ namespace components
 				"  DRAW raw prim=%u  follow=%d\n",
 				PrimitiveCount, _renderer::mirror_vscf_follow_remaining);
 		}
-		return m_pIDirect3DDevice9->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
+		HRESULT hr = m_pIDirect3DDevice9->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
+		if (mirror_rtt::g_pending_early_composite)
+		{
+			mirror_rtt::g_pending_early_composite = false;
+			if (mirror_rtt::g_pass_active || mirror_rtt::g_in_segment)
+			{
+				if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
+				mirror_rtt::final_composite(m_pIDirect3DDevice9);
+			}
+		}
+		return hr;
 	}
 
 	HRESULT d3d9ex::D3D9Device::DrawIndexedPrimitive(D3DPRIMITIVETYPE PrimitiveType, INT BaseVertexIndex, UINT MinVertexIndex, UINT NumVertices, UINT startIndex, UINT primCount)
@@ -785,7 +797,20 @@ namespace components
 				"  DRAW idx prim=%u nverts=%u  follow=%d\n",
 				primCount, NumVertices, _renderer::mirror_vscf_follow_remaining);
 		}
-		return m_pIDirect3DDevice9->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
+		HRESULT hr = m_pIDirect3DDevice9->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
+		// v22: composite the mirrored viewmodel right AFTER the engine's
+		// final tonemap/output draw (the first draw following the PSCF c7
+		// fingerprint). The pending flag was set by SetPixelShaderConstantF.
+		if (mirror_rtt::g_pending_early_composite)
+		{
+			mirror_rtt::g_pending_early_composite = false;
+			if (mirror_rtt::g_pass_active || mirror_rtt::g_in_segment)
+			{
+				if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
+				mirror_rtt::final_composite(m_pIDirect3DDevice9);
+			}
+		}
+		return hr;
 	}
 
 	HRESULT d3d9ex::D3D9Device::DrawPrimitiveUP(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount, CONST void* pVertexStreamZeroData, UINT VertexStreamZeroStride)
@@ -1137,8 +1162,13 @@ namespace components
 				c73 > 2.77f && c73 < 2.78f;
 			if (is_pre_hud_signal)
 			{
+				// v22: do NOT composite here. The next DrawIndexedPrimitive call
+				// is the engine's final tonemap/output pass that writes the
+				// processed scene to the back-buffer (an opaque overwrite).
+				// Compositing before it would let that pass paint over the gun;
+				// instead set a pending flag so we composite AFTER that draw.
 				if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
-				mirror_rtt::final_composite(m_pIDirect3DDevice9);
+				mirror_rtt::g_pending_early_composite = true;
 			}
 		}
 
