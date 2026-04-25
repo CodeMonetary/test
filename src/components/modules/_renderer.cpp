@@ -1537,53 +1537,76 @@ namespace components
 		static const uint32_t CG_DOBJ_GET_WORLD_BONE_MATRIX_ADDR = 0x433F00;
 		static unsigned char* g_trampoline = nullptr;
 
-		// Saved across the call. Single-threaded (D3D9 main thread), so
-		// statics are safe and the post-hook does no engine re-entrancy
-		// that could re-enter CG_DObjGetWorldBoneMatrix in the middle of
-		// our pre-hook.
-		static void*  s_pose         = nullptr;
-		static float* s_axis_out     = nullptr;
-		static float* s_origin_out   = nullptr;
-		static DWORD  s_caller_ret   = 0;
-
-		extern "C" void __cdecl tag_post_hook()
+		// Recursion-safe replacement: the naked stub at 0x433F00 marshals
+		// the __usercall args into a normal __cdecl call to this C
+		// function, which itself calls the original via the trampoline,
+		// then post-processes the outputs. All state lives on the stack
+		// frame, so nested calls (CG_DObjGetWorldBoneMatrix calling itself
+		// for parent bones, or the engine re-entering the function from
+		// inside another viewmodel computation) cannot clobber each other.
+		extern "C" int __cdecl tag_replacement(void* pose, int bone_index,
+			float* axis, void* obj, float* origin)
 		{
+			int result = 0;
+			void* trampoline = g_trampoline;
+
+			// Call the original via the trampoline using its native
+			// __usercall convention (eax=pose, ecx=bone, esi=axis,
+			// stack args obj/origin pushed in reverse order).
+			// ESI is callee-saved per MSVC's __asm contract; we must
+			// preserve it ourselves since we use it as an input register.
+			__asm
+			{
+				push    esi;
+				push    origin;
+				push    obj;
+				mov     esi, axis;
+				mov     ecx, bone_index;
+				mov     eax, pose;
+				call    trampoline;
+				add     esp, 8;
+				mov     result, eax;
+				pop     esi;
+			}
+
+			if (!result) return result;
+
 			const int mirror_fx = (dvars::r_mirrorViewmodel_mirrorFx
 				? dvars::r_mirrorViewmodel_mirrorFx->current.integer : 0);
-			if (!mirror_fx) return;
+			if (!mirror_fx) return result;
 
 			const int rtt_on = (dvars::r_mirrorViewmodel_rtt
 				? dvars::r_mirrorViewmodel_rtt->current.integer : 0);
 			const int method = (dvars::r_mirrorViewmodel_method
 				? dvars::r_mirrorViewmodel_method->current.integer : 0);
-			if (!rtt_on && !method) return;
+			if (!rtt_on && !method) return result;
 
-			if (!game::cgs) return;
+			if (!game::cgs) return result;
 
 			// Filter: only mirror tag results that were queried against the
 			// viewmodel pose. World entities (other players, vehicles, etc.)
 			// also flow through this function and must NOT be mirrored.
-			if (s_pose != static_cast<void*>(&game::cgs->viewModelPose)) return;
+			if (pose != static_cast<void*>(&game::cgs->viewModelPose)) return result;
 
 			const float* vorg  = game::cgs->refdef.vieworg;
 			const float* right = game::cgs->refdef.viewaxis[1];
 
-			if (s_origin_out)
+			if (origin)
 			{
-				const float dx = s_origin_out[0] - vorg[0];
-				const float dy = s_origin_out[1] - vorg[1];
-				const float dz = s_origin_out[2] - vorg[2];
+				const float dx = origin[0] - vorg[0];
+				const float dy = origin[1] - vorg[1];
+				const float dz = origin[2] - vorg[2];
 				const float dot = dx * right[0] + dy * right[1] + dz * right[2];
-				s_origin_out[0] -= 2.0f * dot * right[0];
-				s_origin_out[1] -= 2.0f * dot * right[1];
-				s_origin_out[2] -= 2.0f * dot * right[2];
+				origin[0] -= 2.0f * dot * right[0];
+				origin[1] -= 2.0f * dot * right[1];
+				origin[2] -= 2.0f * dot * right[2];
 			}
 
-			if (s_axis_out)
+			if (axis)
 			{
 				for (int r = 0; r < 3; ++r)
 				{
-					float* row = s_axis_out + r * 3;
+					float* row = axis + r * 3;
 					const float dot = row[0] * right[0] + row[1] * right[1] + row[2] * right[2];
 					row[0] -= 2.0f * dot * right[0];
 					row[1] -= 2.0f * dot * right[1];
@@ -1593,65 +1616,42 @@ namespace components
 
 			const int log_left = (dvars::r_mirrorViewmodel_mirrorFxLog
 				? dvars::r_mirrorViewmodel_mirrorFxLog->current.integer : 0);
-			if (log_left > 0 && dvars::r_mirrorViewmodel_mirrorFxLog && s_origin_out)
+			if (log_left > 0 && dvars::r_mirrorViewmodel_mirrorFxLog && origin)
 			{
 				dvars::r_mirrorViewmodel_mirrorFxLog->current.integer = log_left - 1;
 				game::Com_PrintMessage(0, utils::va(
 					"[tag_mirror] viewmodel tag reflected: origin=(%.1f %.1f %.1f)\n",
-					s_origin_out[0], s_origin_out[1], s_origin_out[2]), 0);
+					origin[0], origin[1], origin[2]), 0);
 			}
+
+			return result;
 		}
 
-		// Post-stub: invoked when the original function returns (because
-		// we replaced its return address with this stub's address). EAX
-		// holds the original return value. We preserve all registers and
-		// flags around the C hook, then jump to the caller's actual
-		// return address. ESP at this point is exactly what the caller
-		// expects after the call (i.e. pointing to the stack args the
-		// caller will clean up with `add esp, 8`).
-		__declspec(naked) void getbonematrix_post_stub()
-		{
-			__asm
-			{
-				pushad;
-				pushfd;
-				call    tag_post_hook;
-				popfd;
-				popad;
-				jmp     dword ptr [s_caller_ret];
-			}
-		}
-
-		// Pre-stub: installed at 0x433F00. Saves the args we need for the
-		// post-hook, swaps the caller's return address with our post-stub,
-		// then jumps to the trampoline (which executes the original first
-		// 5 bytes and continues into the rest of the original function).
+		// Naked stub installed at 0x433F00. Caller's __usercall convention:
+		//   eax = pose, ecx = bone_index, esi = axis (out, 3x3),
+		//   [esp+0] = ret addr, [esp+4] = obj, [esp+8] = origin (out, vec3)
+		// Caller does `add esp, 8` after the call (cdecl-like).
+		//
+		// We translate this into a __cdecl call to tag_replacement, which
+		// has its own stack frame and is therefore recursion-safe. After
+		// tag_replacement returns the original function's return value in
+		// EAX, we balance our pushed args with `add esp, 20` and `ret 0`,
+		// leaving the caller's `obj`/`origin` on the stack so the caller's
+		// own `add esp, 8` cleans up correctly.
 		__declspec(naked) void getbonematrix_stub()
 		{
 			__asm
 			{
-				// Save register args (eax = pose, esi = axis_out).
-				mov     [s_pose], eax;
-				mov     [s_axis_out], esi;
-
-				// Save stack arg origin_out at [esp+8] (post-call layout).
-				// Use edx as scratch (caller-saved, not used as input).
-				mov     edx, [esp + 8];
-				mov     [s_origin_out], edx;
-
-				// Save caller's return address and replace with post-stub.
-				mov     edx, [esp];
-				mov     [s_caller_ret], edx;
-				mov     edx, offset getbonematrix_post_stub;
-				mov     [esp], edx;
-
-				// Run the original first 5 bytes via the trampoline; the
-				// trampoline tail-jumps to 0x433F00 + 5 and the original
-				// function executes normally, with eax/ecx/esi and the
-				// stack args (obj, origin) at the same positions the caller
-				// set up. Its `ret` will pop our post-stub addr -> post
-				// processing runs -> we tail-jump to caller's real return.
-				jmp     dword ptr [g_trampoline];
+				// Push args in reverse order for cdecl call.
+				// At entry: [esp+0]=ret, [esp+4]=obj, [esp+8]=origin.
+				push    [esp + 8];   // origin
+				push    [esp + 8];   // obj (was at +4, now at +8 after push)
+				push    esi;         // axis
+				push    ecx;         // bone_index
+				push    eax;         // pose
+				call    tag_replacement;
+				add     esp, 20;     // clean our 5 pushed args
+				ret     0;           // return to caller; caller cleans its 2 stack args
 			}
 		}
 
