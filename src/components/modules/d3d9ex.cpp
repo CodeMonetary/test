@@ -112,6 +112,29 @@ namespace components
 			IDirect3DStateBlock9* sb = nullptr;
 			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
 
+			// v20: D3D9 state blocks do NOT capture render targets. When the early
+			// composite path runs from the post-FX/HUD-boundary PSCF hook the
+			// engine often has an intermediate post-effect render target bound
+			// (e.g. PINGPONG or POST_EFFECT) that is later consumed as the
+			// tonemap source. Compositing to that RT lets the tonemap pass eat
+			// the gun pixels and the gun ends up invisible. Force the back-buffer
+			// (the actual screen target) for the composite, then restore whatever
+			// the engine had bound so the rest of the frame keeps working.
+			IDirect3DSurface9* prev_color = nullptr;
+			IDirect3DSurface9* bb_surface = nullptr;
+			bool bb_bound = false;
+			if (SUCCEEDED(dev->GetRenderTarget(0, &prev_color)))
+			{
+				if (SUCCEEDED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb_surface)))
+				{
+					if (prev_color != bb_surface)
+					{
+						dev->SetRenderTarget(0, bb_surface);
+						bb_bound = true;
+					}
+				}
+			}
+
 			dev->SetVertexShader(nullptr);
 			dev->SetPixelShader(nullptr);
 			dev->SetRenderState(D3DRS_ZENABLE,          FALSE);
@@ -185,8 +208,13 @@ namespace components
 			};
 			dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(V));
 
-			// Restore everything captured in the state block (incl. stream source 0,
-			// index buffer, vertex decl, shaders, all render states, samplers).
+			// Restore the engine's render target before Apply (state blocks don't
+			// touch RTs), then everything else captured in the state block (incl.
+			// stream source 0, index buffer, vertex decl, shaders, all render
+			// states, samplers).
+			if (bb_bound && prev_color) { dev->SetRenderTarget(0, prev_color); }
+			if (bb_surface) { bb_surface->Release(); bb_surface = nullptr; }
+			if (prev_color) { prev_color->Release(); prev_color = nullptr; }
 			if (sb) { sb->Apply(); sb->Release(); }
 		}
 
