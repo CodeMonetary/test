@@ -98,6 +98,114 @@ namespace components
 			else                 dev->SetDepthStencilSurface(nullptr);
 		}
 
+		static bool inject_into_tonemap_source(IDirect3DDevice9* dev)
+		{
+			if (g_in_segment) end_segment(dev);
+			if (!g_pass_active) return false;
+
+			IDirect3DBaseTexture9* source_base = nullptr;
+			IDirect3DTexture9* source_tex = nullptr;
+			IDirect3DSurface9* source_surface = nullptr;
+			IDirect3DSurface9* prev_color = nullptr;
+			IDirect3DSurface9* prev_depth = nullptr;
+			IDirect3DStateBlock9* sb = nullptr;
+			bool ok = false;
+
+			if (FAILED(dev->GetTexture(0, &source_base)) || !source_base) goto cleanup;
+			if (FAILED(source_base->QueryInterface(IID_IDirect3DTexture9, reinterpret_cast<void**>(&source_tex))) || !source_tex) goto cleanup;
+			if (FAILED(source_tex->GetSurfaceLevel(0, &source_surface)) || !source_surface) goto cleanup;
+			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
+			if (FAILED(dev->GetRenderTarget(0, &prev_color)) || !prev_color) goto cleanup;
+			if (FAILED(dev->GetDepthStencilSurface(&prev_depth))) prev_depth = nullptr;
+
+			dev->SetRenderTarget(0, source_surface);
+			dev->SetDepthStencilSurface(nullptr);
+			dev->SetVertexShader(nullptr);
+			dev->SetPixelShader(nullptr);
+			dev->SetRenderState(D3DRS_ZENABLE,          FALSE);
+			dev->SetRenderState(D3DRS_ZWRITEENABLE,     FALSE);
+			dev->SetRenderState(D3DRS_CULLMODE,         D3DCULL_NONE);
+			dev->SetRenderState(D3DRS_LIGHTING,         FALSE);
+			dev->SetRenderState(D3DRS_FOGENABLE,        FALSE);
+			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,  FALSE);
+			dev->SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE);
+			dev->SetRenderState(D3DRS_COLORWRITEENABLE,
+				D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN |
+				D3DCOLORWRITEENABLE_BLUE | D3DCOLORWRITEENABLE_ALPHA);
+			dev->SetRenderState(D3DRS_STENCILENABLE,    FALSE);
+
+			const int blend_mode = dvars::r_mirrorViewmodel_rttBlend
+				? dvars::r_mirrorViewmodel_rttBlend->current.integer : 2;
+			dev->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+			switch (blend_mode)
+			{
+			case 1:
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_SRCALPHA);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_INVSRCALPHA);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  TRUE);
+				dev->SetRenderState(D3DRS_ALPHAREF,         1);
+				dev->SetRenderState(D3DRS_ALPHAFUNC,        D3DCMP_GREATEREQUAL);
+				break;
+			case 2:
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  FALSE);
+				break;
+			case 3:
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  TRUE);
+				dev->SetRenderState(D3DRS_ALPHAREF,         1);
+				dev->SetRenderState(D3DRS_ALPHAFUNC,        D3DCMP_GREATEREQUAL);
+				break;
+			case 0:
+			default:
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_SRCALPHA);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_INVSRCALPHA);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  FALSE);
+				break;
+			}
+			dev->SetTextureStageState(0, D3DTSS_COLOROP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAOP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+			dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+			dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSU,  D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSV,  D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+			dev->SetTexture(0, g_tex);
+			dev->SetVertexDeclaration(nullptr);
+			dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+
+			const float W = (float)g_w;
+			const float H = (float)g_h;
+			struct V { float x, y, z, rhw, u, v; };
+			V quad[4] = {
+				{ -0.5f,    -0.5f,    0.0f, 1.0f, 1.0f, 0.0f },
+				{  W-0.5f,  -0.5f,    0.0f, 1.0f, 0.0f, 0.0f },
+				{ -0.5f,     H-0.5f,  0.0f, 1.0f, 1.0f, 1.0f },
+				{  W-0.5f,   H-0.5f,  0.0f, 1.0f, 0.0f, 1.0f },
+			};
+			dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(V));
+			ok = true;
+
+		cleanup:
+			if (prev_color) { dev->SetRenderTarget(0, prev_color); prev_color->Release(); prev_color = nullptr; }
+			if (prev_depth) { dev->SetDepthStencilSurface(prev_depth); prev_depth->Release(); prev_depth = nullptr; }
+			else            { dev->SetDepthStencilSurface(nullptr); }
+			if (sb) { sb->Apply(); sb->Release(); }
+			if (source_surface) { source_surface->Release(); source_surface = nullptr; }
+			if (source_tex) { source_tex->Release(); source_tex = nullptr; }
+			if (source_base) { source_base->Release(); source_base = nullptr; }
+			if (ok) g_pass_active = false;
+			return ok;
+		}
+
 		static void final_composite(IDirect3DDevice9* dev)
 		{
 			if (g_in_segment) end_segment(dev); // safety net (no stdp seen before EndScene)
@@ -1180,13 +1288,25 @@ namespace components
 				c73 > 1.0f && c73 < 5.0f;
 			if (is_pre_hud_signal)
 			{
-				// v22: do NOT composite here. The next DrawIndexedPrimitive call
-				// is the engine's final tonemap/output pass that writes the
-				// processed scene to the back-buffer (an opaque overwrite).
-				// Compositing before it would let that pass paint over the gun;
-				// instead set a pending flag so we composite AFTER that draw.
-				if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
-				mirror_rtt::g_pending_early_composite = true;
+				const int tonemap_inject = dvars::r_mirrorViewmodel_rttTonemapInject
+					? dvars::r_mirrorViewmodel_rttTonemapInject->current.integer : 1;
+				if (tonemap_inject && mirror_rtt::inject_into_tonemap_source(m_pIDirect3DDevice9))
+				{
+					// v25: merge the mirrored gun into the engine's tonemap SOURCE
+					// texture before the final fullscreen tonemap-output draw so the
+					// gun receives the same film / contrast / color-grade curve as
+					// the world.
+				}
+				else
+				{
+					// v22 fallback: do NOT composite here. The next DrawIndexedPrimitive
+					// call is the engine's final tonemap/output pass that writes the
+					// processed scene to the back-buffer (an opaque overwrite).
+					// Compositing before it would let that pass paint over the gun;
+					// instead set a pending flag so we composite AFTER that draw.
+					if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
+					mirror_rtt::g_pending_early_composite = true;
+				}
 			}
 		}
 

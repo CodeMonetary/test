@@ -1554,6 +1554,14 @@ namespace components
 			/* maxVal	*/ 3,
 			/* flags	*/ game::dvar_flags::saved);
 
+		dvars::r_mirrorViewmodel_rttTonemapInject = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_rttTonemapInject",
+			/* desc		*/ "v25: lighting-correct mirrored gun by compositing the off-screen viewmodel into the engine's tonemap SOURCE texture before the final tonemap-output fullscreen draw. This makes the engine apply the same film/contrast/color-grade curve to the gun that it already applies to the world, avoiding the warm 'sandy' tint seen when the gun is pasted onto the back-buffer after tonemap. 0 = legacy v23/v24 behavior (composite after tonemap to bb). 1 = inject into tonemap source when the PSCF c5/c6/c7 fingerprint is available, fallback to bb composite if injection fails (default).",
+			/* default	*/ 1,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 1,
+			/* flags	*/ game::dvar_flags::saved);
+
 		// increase fps cap to 125 for menus and loadscreen
 		utils::hook::set<BYTE>(0x500174 + 2, 8);
 		utils::hook::set<BYTE>(0x500177 + 2, 8);
