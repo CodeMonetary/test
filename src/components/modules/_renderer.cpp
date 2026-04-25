@@ -1924,12 +1924,15 @@ namespace components
 		// is 0 because the pre-hook bails immediately in that case.
 		fx_mirror::install();
 
-		// v27: install the tag-mirror detour on CG_DObjGetWorldBoneMatrix.
-		// This catches first-person tag-derived FX (muzzleflash, brass,
-		// dynamic light attach, ...) that don't go through the v26
-		// FX_SpawnOrientedEffect path. Gated by the same r_mirrorViewmodel_mirrorFx
-		// dvar; the post-hook bails when the dvar is 0.
-		tag_mirror::install();
+		// v27c: tag_mirror::install() is DISABLED. Hooking 0x433F00 turned
+		// out to be incompatible with this build of iw3mp.exe during weapon
+		// firing (the engine crashes on the very first call to the function
+		// on the shooting code path even with mirrorFx=0, i.e. with the hook
+		// in pure pass-through mode and not modifying any output). The dvars
+		// and tag_replacement code are kept compiled in so we can re-enable
+		// it from a future patch once we have a safer hook point or a
+		// length-disassembling trampoline. For now: shoot freely.
+		// tag_mirror::install();
 
 		// increase fps cap to 125 for menus and loadscreen
 		utils::hook::set<BYTE>(0x500174 + 2, 8);
