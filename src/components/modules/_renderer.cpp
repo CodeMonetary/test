@@ -1620,17 +1620,30 @@ namespace components
 				origin[2] -= 2.0f * dot * mirror_n[2];
 			}
 
-			// Reflecting the 3x3 axis produces a left-handed (det = -1)
-			// basis. Many engine consumers (AxisToAngles, FX axis-aligned
-			// sprite math, etc.) assume right-handedness and crash or
-			// blow up on improper rotations. Origin mirroring alone is
-			// sufficient for camera-billboard FX (muzzleflash sprite,
-			// tracer line) — they spawn at the mirrored position and
-			// face the camera regardless. Only mirror the axis when the
-			// user explicitly opts in via r_mirrorViewmodel_mirrorFxAxis.
+			// v31: 3 axis-mirror modes:
+			//   0 - origin only, axis untouched. Default. Safe but the
+			//       brass/casing ejection DIRECTION (encoded in axis[0])
+			//       is not mirrored, so the casing spawns at the mirrored
+			//       position but flies in the original (non-mirrored)
+			//       direction. From the player's POV this looks like the
+			//       casing comes out the wrong side of the gun and drifts
+			//       across as the camera rotates - matches the symptom
+			//       reported on v29.
+			//   1 - reflect all three axis rows across the mirror plane.
+			//       Mathematically a true mirror but produces a left-
+			//       handed basis (det = -1). Engine consumers like
+			//       AxisToAngles assume right-handedness and crash on
+			//       improper rotations - matches the v27b crash on shoot.
+			//   2 - "right-handed mirror" (NEW): reflect rows 0 and 2,
+			//       negate row 1. Equivalent to reflection o R(180deg
+			//       around row1), preserves det = +1 so AxisToAngles is
+			//       happy. axis[0] (forward / brass eject dir) is
+			//       correctly mirrored, axis[2] (up) is correctly
+			//       mirrored, axis[1] (side) ends up rotated 180deg
+			//       which is harmless for symmetric brass.
 			const int mirror_axis = (dvars::r_mirrorViewmodel_mirrorFxAxis
 				? dvars::r_mirrorViewmodel_mirrorFxAxis->current.integer : 0);
-			if (axis && mirror_axis)
+			if (axis && mirror_axis == 1)
 			{
 				for (int r = 0; r < 3; ++r)
 				{
@@ -1640,6 +1653,26 @@ namespace components
 					row[1] -= 2.0f * dot * mirror_n[1];
 					row[2] -= 2.0f * dot * mirror_n[2];
 				}
+			}
+			else if (axis && mirror_axis == 2)
+			{
+				// rows 0 and 2: reflect across mirror plane.
+				for (int r = 0; r < 3; r += 2)
+				{
+					float* row = axis + r * 3;
+					const float dot = row[0] * mirror_n[0] + row[1] * mirror_n[1] + row[2] * mirror_n[2];
+					row[0] -= 2.0f * dot * mirror_n[0];
+					row[1] -= 2.0f * dot * mirror_n[1];
+					row[2] -= 2.0f * dot * mirror_n[2];
+				}
+				// row 1: reflect AND negate (= just keep row1 same up to
+				// sign? actually need: reflected_row1 then *-1 to recover
+				// right-handedness). Equivalent: row1' = -reflect(row1).
+				float* row1 = axis + 3;
+				const float dot = row1[0] * mirror_n[0] + row1[1] * mirror_n[1] + row1[2] * mirror_n[2];
+				row1[0] = -(row1[0] - 2.0f * dot * mirror_n[0]);
+				row1[1] = -(row1[1] - 2.0f * dot * mirror_n[1]);
+				row1[2] = -(row1[2] - 2.0f * dot * mirror_n[2]);
 			}
 
 			// v30: extended logging - dump full geometric state so we can
@@ -1979,10 +2012,10 @@ namespace components
 
 		dvars::r_mirrorViewmodel_mirrorFxAxis = game::Dvar_RegisterInt(
 			/* name		*/ "r_mirrorViewmodel_mirrorFxAxis",
-			/* desc		*/ "v27a: also reflect the 3x3 axis matrix (orientation) of mirrored viewmodel tag results, in addition to the origin. Reflecting the axis produces a left-handed (det = -1) basis which can crash the engine in some FX paths (AxisToAngles, axis-aligned sprite math, etc.). Origin-only mirroring is sufficient for camera-billboard FX (muzzleflash sprite, brass spawn position, tracer line origin) which look correct because they billboard to the camera. 0 = mirror origin only (default, safe). 1 = mirror origin + axis (full reflection, may crash on shooting depending on weapon FX).",
+			/* desc		*/ "v31: 0 = origin only (safe but brass eject DIRECTION is not mirrored, so casing flies the wrong way and looks like it drifts when you turn). 1 = full reflection (left-handed det=-1, may crash AxisToAngles). 2 = right-handed mirror (NEW): reflect rows 0 & 2, negate row 1; det stays +1 so engine math is happy AND the brass eject direction is correctly mirrored. Try 2 if origin-only looks like the casings come out the wrong side.",
 			/* default	*/ 0,
 			/* minVal	*/ 0,
-			/* maxVal	*/ 1,
+			/* maxVal	*/ 2,
 			/* flags	*/ game::dvar_flags::saved);
 
 		dvars::r_mirrorViewmodel_mirrorFxAxisIdx = game::Dvar_RegisterInt(
