@@ -1530,6 +1530,14 @@ namespace components
 			/* maxVal	*/ 1,
 			/* flags	*/ game::dvar_flags::saved);
 
+		dvars::r_mirrorViewmodel_rttBlend = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_rttBlend",
+			/* desc		*/ "v13: blend mode for compositing the off-screen viewmodel texture onto the back-buffer. 0 = SRCALPHA/INVSRCALPHA (relies on gun shader writing alpha=0 outside the gun mesh; black artifacts if it doesn't). 1 = SRCALPHA/INVSRCALPHA + ALPHATEST > 0 (discards cleared alpha=0 pixels). 2 = additive ONE/ONE (gun adds on top of world; cleared regions add 0; brightness may double where gun overlaps world). 3 = additive ONE/ONE + ALPHATEST > 0 (only gun pixels add).",
+			/* default	*/ 2,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 3,
+			/* flags	*/ game::dvar_flags::saved);
+
 		// increase fps cap to 125 for menus and loadscreen
 		utils::hook::set<BYTE>(0x500174 + 2, 8);
 		utils::hook::set<BYTE>(0x500177 + 2, 8);

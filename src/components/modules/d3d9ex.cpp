@@ -96,6 +96,10 @@ namespace components
 			dev->GetRenderState(D3DRS_FOGENABLE,         &oldFE);
 			dev->GetRenderState(D3DRS_ALPHATESTENABLE,   &oldAT);
 			dev->GetRenderState(D3DRS_SRGBWRITEENABLE,   &oldSrgb);
+			DWORD oldBlendOp, oldAlphaRef, oldAlphaFunc;
+			dev->GetRenderState(D3DRS_BLENDOP,    &oldBlendOp);
+			dev->GetRenderState(D3DRS_ALPHAREF,   &oldAlphaRef);
+			dev->GetRenderState(D3DRS_ALPHAFUNC,  &oldAlphaFunc);
 			dev->GetTextureStageState(0, D3DTSS_COLOROP,   &oldStg0_CO);
 			dev->GetTextureStageState(0, D3DTSS_COLORARG1, &oldStg0_CA1);
 			dev->GetTextureStageState(0, D3DTSS_ALPHAOP,   &oldStg0_AO);
@@ -113,14 +117,47 @@ namespace components
 			dev->SetPixelShader(nullptr);
 			dev->SetRenderState(D3DRS_ZENABLE,          FALSE);
 			dev->SetRenderState(D3DRS_ZWRITEENABLE,     FALSE);
-			dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
-			dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_SRCALPHA);
-			dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_INVSRCALPHA);
 			dev->SetRenderState(D3DRS_CULLMODE,         D3DCULL_NONE);
 			dev->SetRenderState(D3DRS_LIGHTING,         FALSE);
 			dev->SetRenderState(D3DRS_FOGENABLE,        FALSE);
-			dev->SetRenderState(D3DRS_ALPHATESTENABLE,  FALSE);
 			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,  FALSE);
+
+			// v13: composite blend mode is selectable.
+			const int blend_mode = dvars::r_mirrorViewmodel_rttBlend
+				? dvars::r_mirrorViewmodel_rttBlend->current.integer : 2;
+			dev->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+			switch (blend_mode)
+			{
+			case 1: // SRCALPHA/INVSRCALPHA + ALPHATEST > 0
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_SRCALPHA);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_INVSRCALPHA);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  TRUE);
+				dev->SetRenderState(D3DRS_ALPHAREF,         1);
+				dev->SetRenderState(D3DRS_ALPHAFUNC,        D3DCMP_GREATEREQUAL);
+				break;
+			case 2: // additive ONE/ONE
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  FALSE);
+				break;
+			case 3: // additive ONE/ONE + ALPHATEST > 0
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  TRUE);
+				dev->SetRenderState(D3DRS_ALPHAREF,         1);
+				dev->SetRenderState(D3DRS_ALPHAFUNC,        D3DCMP_GREATEREQUAL);
+				break;
+			case 0: // SRCALPHA/INVSRCALPHA (legacy v12)
+			default:
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_SRCALPHA);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_INVSRCALPHA);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  FALSE);
+				break;
+			}
 			dev->SetTextureStageState(0, D3DTSS_COLOROP,   D3DTOP_SELECTARG1);
 			dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
 			dev->SetTextureStageState(0, D3DTSS_ALPHAOP,   D3DTOP_SELECTARG1);
@@ -158,6 +195,9 @@ namespace components
 			dev->SetRenderState(D3DRS_FOGENABLE,        oldFE);
 			dev->SetRenderState(D3DRS_ALPHATESTENABLE,  oldAT);
 			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,  oldSrgb);
+			dev->SetRenderState(D3DRS_BLENDOP,    oldBlendOp);
+			dev->SetRenderState(D3DRS_ALPHAREF,   oldAlphaRef);
+			dev->SetRenderState(D3DRS_ALPHAFUNC,  oldAlphaFunc);
 			dev->SetTextureStageState(0, D3DTSS_COLOROP,   oldStg0_CO);
 			dev->SetTextureStageState(0, D3DTSS_COLORARG1, oldStg0_CA1);
 			dev->SetTextureStageState(0, D3DTSS_ALPHAOP,   oldStg0_AO);
