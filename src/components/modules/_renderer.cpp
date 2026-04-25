@@ -2026,6 +2026,14 @@ namespace components
 			/* maxVal	*/ 2,
 			/* flags	*/ game::dvar_flags::saved);
 
+		dvars::r_fullMirror = game::Dvar_RegisterInt(
+			/* name		*/ "r_fullMirror",
+			/* desc		*/ "v32: full-screen mirror for video editing. 0 = off. 1 = mirror world+gun together BEFORE HUD (HUD stays in place); a horizontal flip is applied on the back-buffer right after the engine tonemap pass. With r_mirrorViewmodel_rtt=1 active the mirrored gun (rendered to LEFT) gets flipped a second time so the gun visually appears on the RIGHT while the world is mirrored. 2 = mirror EVERYTHING including HUD (single horizontal flip of the entire final frame at EndScene; the simplest brute-force option).",
+			/* default	*/ 0,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 2,
+			/* flags	*/ game::dvar_flags::saved);
+
 		// Install the FX mirror detour. Safe even when r_mirrorViewmodel_mirrorFx
 		// is 0 because the pre-hook bails immediately in that case.
 		fx_mirror::install();

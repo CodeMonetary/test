@@ -40,6 +40,16 @@ namespace components
 		static bool g_in_segment                 = false; // off-screen RT currently bound
 		static bool g_pending_early_composite    = false; // v22: set on PSCF c7 fingerprint, fires AFTER the next draw (the engine's final tonemap-output) instead of before it
 
+		// v32: full-screen mirror (`r_fullMirror`).
+		//   0 = off
+		//   1 = flip BB AFTER tonemap, BEFORE HUD => world+gun mirror, HUD intact
+		//   2 = flip BB at EndScene             => everything including HUD
+		static IDirect3DTexture9* g_flip_tex     = nullptr;
+		static IDirect3DSurface9* g_flip_surf    = nullptr;
+		static int  g_flip_w                     = 0;
+		static int  g_flip_h                     = 0;
+		static bool g_pending_fullmirror_flip    = false; // set on PSCF c7 fingerprint when fullMirror==1; fires AFTER the next draw
+
 		static void release_targets()
 		{
 			if (g_color) { g_color->Release(); g_color = nullptr; }
@@ -339,6 +349,99 @@ namespace components
 			if (sb) { sb->Apply(); sb->Release(); }
 		}
 
+		static void release_flip_target()
+		{
+			if (g_flip_surf) { g_flip_surf->Release(); g_flip_surf = nullptr; }
+			if (g_flip_tex)  { g_flip_tex->Release();  g_flip_tex  = nullptr; }
+			g_flip_w = g_flip_h = 0;
+		}
+
+		static bool ensure_flip_target(IDirect3DDevice9* dev)
+		{
+			IDirect3DSurface9* bb = nullptr;
+			if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return false;
+			D3DSURFACE_DESC bd; bb->GetDesc(&bd); bb->Release();
+			if (g_flip_tex && (int)bd.Width == g_flip_w && (int)bd.Height == g_flip_h) return true;
+			release_flip_target();
+			if (FAILED(dev->CreateTexture(bd.Width, bd.Height, 1, D3DUSAGE_RENDERTARGET,
+				bd.Format, D3DPOOL_DEFAULT, &g_flip_tex, nullptr))) return false;
+			if (FAILED(g_flip_tex->GetSurfaceLevel(0, &g_flip_surf))) { release_flip_target(); return false; }
+			g_flip_w = (int)bd.Width;
+			g_flip_h = (int)bd.Height;
+			return true;
+		}
+
+		// v32: copy current backbuffer to a temp texture, then redraw the
+		// backbuffer with horizontally inverted UVs. The result is a full-
+		// screen horizontal flip of whatever was last drawn on the BB.
+		static bool do_fullscreen_flip(IDirect3DDevice9* dev)
+		{
+			if (!ensure_flip_target(dev)) return false;
+			IDirect3DSurface9* bb = nullptr;
+			if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return false;
+			IDirect3DSurface9* prev_color = nullptr;
+			IDirect3DSurface9* prev_depth = nullptr;
+			IDirect3DStateBlock9* sb = nullptr;
+			bool ok = false;
+			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
+			if (FAILED(dev->GetRenderTarget(0, &prev_color))) prev_color = nullptr;
+			if (FAILED(dev->GetDepthStencilSurface(&prev_depth))) prev_depth = nullptr;
+
+			// Copy current BB to flip texture
+			if (FAILED(dev->StretchRect(bb, nullptr, g_flip_surf, nullptr, D3DTEXF_NONE))) goto cleanup;
+
+			dev->SetRenderTarget(0, bb);
+			dev->SetDepthStencilSurface(nullptr);
+			dev->SetVertexShader(nullptr);
+			dev->SetPixelShader(nullptr);
+			dev->SetRenderState(D3DRS_ZENABLE,           FALSE);
+			dev->SetRenderState(D3DRS_ZWRITEENABLE,      FALSE);
+			dev->SetRenderState(D3DRS_CULLMODE,          D3DCULL_NONE);
+			dev->SetRenderState(D3DRS_LIGHTING,          FALSE);
+			dev->SetRenderState(D3DRS_FOGENABLE,         FALSE);
+			dev->SetRenderState(D3DRS_ALPHABLENDENABLE,  FALSE);
+			dev->SetRenderState(D3DRS_ALPHATESTENABLE,   FALSE);
+			dev->SetRenderState(D3DRS_STENCILENABLE,     FALSE);
+			dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,   FALSE);
+			dev->SetRenderState(D3DRS_COLORWRITEENABLE,
+				D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN |
+				D3DCOLORWRITEENABLE_BLUE | D3DCOLORWRITEENABLE_ALPHA);
+			dev->SetTextureStageState(0, D3DTSS_COLOROP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAOP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+			dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+			dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSU,  D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSV,  D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+			dev->SetTexture(0, g_flip_tex);
+			dev->SetVertexDeclaration(nullptr);
+			dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+			{
+				const float W = (float)g_flip_w;
+				const float H = (float)g_flip_h;
+				struct V { float x, y, z, rhw, u, v; };
+				V quad[4] = {
+					{ -0.5f,    -0.5f,   0.0f, 1.0f, 1.0f, 0.0f },
+					{  W-0.5f,  -0.5f,   0.0f, 1.0f, 0.0f, 0.0f },
+					{ -0.5f,     H-0.5f, 0.0f, 1.0f, 1.0f, 1.0f },
+					{  W-0.5f,   H-0.5f, 0.0f, 1.0f, 0.0f, 1.0f },
+				};
+				dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(V));
+			}
+			ok = true;
+
+		cleanup:
+			if (prev_color) { dev->SetRenderTarget(0, prev_color); prev_color->Release(); }
+			if (prev_depth) { dev->SetDepthStencilSurface(prev_depth); prev_depth->Release(); }
+			else            { dev->SetDepthStencilSurface(nullptr); }
+			if (sb) { sb->Apply(); sb->Release(); }
+			if (bb) bb->Release();
+			return ok;
+		}
+
 		static void on_device_reset()
 		{
 			if (g_saved_color) { g_saved_color->Release(); g_saved_color = nullptr; }
@@ -346,7 +449,9 @@ namespace components
 			g_pass_active            = false;
 			g_in_segment             = false;
 			g_pending_early_composite = false;
+			g_pending_fullmirror_flip = false;
 			release_targets();
+			release_flip_target();
 		}
 	}
 
@@ -645,6 +750,16 @@ namespace components
 			}
 		}
 
+		// v32: r_fullMirror == 2 path: a single horizontal flip of the
+		// entire final frame (including HUD). EndScene runs after the
+		// engine has drawn the HUD, so flipping the BB here mirrors
+		// world + gun + HUD as one. Brute-force option for video editing.
+		{
+			const int full_mirror_eos = dvars::r_fullMirror
+				? dvars::r_fullMirror->current.integer : 0;
+			if (full_mirror_eos == 2) mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
+		}
+
 		return m_pIDirect3DDevice9->EndScene();
 	}
 
@@ -905,6 +1020,14 @@ namespace components
 				mirror_rtt::final_composite(m_pIDirect3DDevice9);
 			}
 		}
+		// v32: full-screen flip request from PSCF c7 fingerprint
+		// (r_fullMirror == 1). Fires AFTER any early-composite so it
+		// captures world + already-composited gun.
+		if (mirror_rtt::g_pending_fullmirror_flip)
+		{
+			mirror_rtt::g_pending_fullmirror_flip = false;
+			mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
+		}
 		return hr;
 	}
 
@@ -929,6 +1052,14 @@ namespace components
 				if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
 				mirror_rtt::final_composite(m_pIDirect3DDevice9);
 			}
+		}
+		// v32: full-screen flip request from PSCF c7 fingerprint
+		// (r_fullMirror == 1). Fires AFTER any early-composite so it
+		// captures world + already-composited gun.
+		if (mirror_rtt::g_pending_fullmirror_flip)
+		{
+			mirror_rtt::g_pending_fullmirror_flip = false;
+			mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
 		}
 		return hr;
 	}
@@ -1308,6 +1439,28 @@ namespace components
 					if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
 					mirror_rtt::g_pending_early_composite = true;
 				}
+			}
+		}
+
+		// v32: detect the same PSCF c7 tonemap fingerprint INDEPENDENTLY
+		// for r_fullMirror == 1. Sets a pending flag that fires after
+		// the next draw (tonemap output) so the BB is mirrored before
+		// HUD draws on top.
+		{
+			const int full_mirror = dvars::r_fullMirror
+				? dvars::r_fullMirror->current.integer : 0;
+			if (full_mirror == 1 && pConstantData && StartRegister == 7 && Vector4fCount >= 1)
+			{
+				const float c70 = pConstantData[0];
+				const float c71 = pConstantData[1];
+				const float c72 = pConstantData[2];
+				const float c73 = pConstantData[3];
+				auto fapprox_eq = [](float a, float b) { float d = a - b; if (d < 0) d = -d; return d < 1e-4f; };
+				const bool is_pre_hud_signal =
+					c70 < 0.0f && c70 > -0.2f &&
+					fapprox_eq(c70, c71) && fapprox_eq(c70, c72) &&
+					c73 > 1.0f && c73 < 5.0f;
+				if (is_pre_hud_signal) mirror_rtt::g_pending_fullmirror_flip = true;
 			}
 		}
 
