@@ -196,6 +196,9 @@ namespace dvars
 	extern game::dvar_s* r_mirrorViewmodel_rttEarlyComposite;
 	extern game::dvar_s* r_mirrorViewmodel_compositeSrgb;
 	extern game::dvar_s* r_mirrorViewmodel_rttTonemapInject;
+	extern game::dvar_s* r_mirrorViewmodel_mirrorFx;
+	extern game::dvar_s* r_mirrorViewmodel_mirrorFxDist;
+	extern game::dvar_s* r_mirrorViewmodel_mirrorFxLog;
 	extern game::dvar_s* bg_bobIdle;
 
 	// Debug collision

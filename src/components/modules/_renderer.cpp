@@ -1363,6 +1363,156 @@ namespace components
 		}
 	}
 
+	// =====================================================================
+	// fx_mirror (v26): mirror first-person FX (muzzleflash, brass, etc.)
+	// when the viewmodel mirror pipeline is active.
+	//
+	// CoD4 cgame spawns first-person FX through FX_SpawnOrientedEffect at
+	// 0x4A14B0 with origin/axis at world positions of view-bound tags
+	// (tag_flash, tag_brass). They render in the world projection (no
+	// dhp), so the off-screen RTT viewmodel mirror does NOT capture them.
+	// They appear at the "real" right-hand barrel position even though
+	// the gun is visually flipped to the left.
+	//
+	// Strategy: pre-hook FX_SpawnOrientedEffect; when |origin - vieworg|
+	// is small (first-person FX) AND a mirror mode is active, reflect
+	// origin and each axis row across the plane through the camera origin
+	// with normal = camera right axis (refdef.viewaxis[1]). World FX are
+	// far from the camera and unaffected.
+	// =====================================================================
+	namespace fx_mirror
+	{
+		static const uint32_t FX_SPAWN_ORIENTED_ADDR = 0x4A14B0;
+		static unsigned char* g_trampoline = nullptr;
+
+		extern "C" void __cdecl fx_orient_pre_hook(int /*markentnum*/, float* axis,
+			void* /*def*/, int /*msec*/, float* origin)
+		{
+			if (!axis || !origin) return;
+
+			const int mirror_fx = (dvars::r_mirrorViewmodel_mirrorFx
+				? dvars::r_mirrorViewmodel_mirrorFx->current.integer : 0);
+			if (!mirror_fx) return;
+
+			const int rtt_on = (dvars::r_mirrorViewmodel_rtt
+				? dvars::r_mirrorViewmodel_rtt->current.integer : 0);
+			const int method = (dvars::r_mirrorViewmodel_method
+				? dvars::r_mirrorViewmodel_method->current.integer : 0);
+			if (!rtt_on && !method) return; // mirror feature off entirely
+
+			if (!game::cgs) return;
+
+			const float* vorg = game::cgs->refdef.vieworg;
+			const float dx = origin[0] - vorg[0];
+			const float dy = origin[1] - vorg[1];
+			const float dz = origin[2] - vorg[2];
+			const float d2 = dx * dx + dy * dy + dz * dz;
+
+			const float maxd = (dvars::r_mirrorViewmodel_mirrorFxDist
+				? dvars::r_mirrorViewmodel_mirrorFxDist->current.value : 64.0f);
+			if (d2 > maxd * maxd) return; // world FX, leave alone
+
+			const float* right = game::cgs->refdef.viewaxis[1];
+
+			// Reflect origin around plane through vieworg with normal = right.
+			// off' = off - 2 * dot(off, right) * right
+			const float dot_o = dx * right[0] + dy * right[1] + dz * right[2];
+			origin[0] -= 2.0f * dot_o * right[0];
+			origin[1] -= 2.0f * dot_o * right[1];
+			origin[2] -= 2.0f * dot_o * right[2];
+
+			// Reflect each of the three axis rows (3 floats each) about right.
+			// The result is a left-handed basis, which is exactly what we
+			// want for a visual mirror (sprite/oriented FX render correctly
+			// when their basis is reflected).
+			for (int r = 0; r < 3; ++r)
+			{
+				float* row = axis + r * 3;
+				const float dot_a = row[0] * right[0] + row[1] * right[1] + row[2] * right[2];
+				row[0] -= 2.0f * dot_a * right[0];
+				row[1] -= 2.0f * dot_a * right[1];
+				row[2] -= 2.0f * dot_a * right[2];
+			}
+
+			const int log_left = (dvars::r_mirrorViewmodel_mirrorFxLog
+				? dvars::r_mirrorViewmodel_mirrorFxLog->current.integer : 0);
+			if (log_left > 0 && dvars::r_mirrorViewmodel_mirrorFxLog)
+			{
+				dvars::r_mirrorViewmodel_mirrorFxLog->current.integer = log_left - 1;
+				game::Com_PrintMessage(0, utils::va(
+					"[fx_mirror] reflected: origin=(%.1f %.1f %.1f) d=%.1f\n",
+					origin[0], origin[1], origin[2], (float)sqrt((double)d2)), 0);
+			}
+		}
+
+		// Detour stub. Original calling convention (__usercall):
+		//   ecx     = markentnum
+		//   edx     = axis (float* to 3x3)
+		//   [esp+4] = def (FxEffectDef*)
+		//   [esp+8] = msec_begin (int)
+		//   [esp+12]= origin (float* to vec3)
+		// Caller cleans up the 3 stack args after the call (cdecl-like).
+		__declspec(naked) void fx_spawn_oriented_stub()
+		{
+			__asm
+			{
+				pushad;                  // saves: edi(+0) esi(+4) ebp(+8) esp(+12) ebx(+16) edx(+20) ecx(+24) eax(+28)
+
+				// Pull our register args out of the saved frame.
+				mov     eax, [esp + 24]; // markentnum (ecx)
+				mov     ebx, [esp + 20]; // axis       (edx)
+
+				// Stack args, accounting for pushad's 32 bytes:
+				//   [esp+32] = original return addr
+				//   [esp+36] = def
+				//   [esp+40] = msec_begin
+				//   [esp+44] = origin
+				push    [esp + 44];      // origin
+				push    [esp + 44];      // msec_begin (now +44 after one push)
+				push    [esp + 44];      // def
+				push    ebx;             // axis
+				push    eax;             // markentnum
+				call    fx_orient_pre_hook;
+				add     esp, 20;
+
+				popad;
+
+				// Run the original first 5 bytes via the trampoline, which
+				// then jumps to FX_SPAWN_ORIENTED_ADDR + 5 (continues normal
+				// execution; ECX/EDX/stack args are untouched relative to
+				// what the caller set up).
+				jmp     dword ptr [g_trampoline];
+			}
+		}
+
+		void install()
+		{
+			if (g_trampoline) return;
+
+			// Allocate executable trampoline: original 5 bytes + JMP rel32 = 10 bytes.
+			g_trampoline = static_cast<unsigned char*>(VirtualAlloc(
+				nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+			if (!g_trampoline) return;
+
+			// Copy the original first 5 bytes BEFORE installing the hook.
+			memcpy(g_trampoline, reinterpret_cast<const void*>(FX_SPAWN_ORIENTED_ADDR), 5);
+
+			// Append JMP rel32 -> FX_SPAWN_ORIENTED_ADDR + 5
+			const intptr_t jmp_from = reinterpret_cast<intptr_t>(g_trampoline) + 5;
+			const intptr_t jmp_to   = static_cast<intptr_t>(FX_SPAWN_ORIENTED_ADDR + 5);
+			g_trampoline[5] = 0xE9;
+			*reinterpret_cast<int32_t*>(g_trampoline + 6) =
+				static_cast<int32_t>(jmp_to - (jmp_from + 5));
+
+			FlushInstructionCache(GetCurrentProcess(), g_trampoline, 16);
+
+			// Install the hook (overwrites first 5 bytes of the original
+			// with JMP fx_spawn_oriented_stub).
+			utils::hook(FX_SPAWN_ORIENTED_ADDR, fx_spawn_oriented_stub, HOOK_JUMP)
+				.install()->quick();
+		}
+	}
+
 	_renderer::_renderer()
 	{
 		/*
@@ -1561,6 +1711,34 @@ namespace components
 			/* minVal	*/ 0,
 			/* maxVal	*/ 1,
 			/* flags	*/ game::dvar_flags::saved);
+
+		dvars::r_mirrorViewmodel_mirrorFx = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_mirrorFx",
+			/* desc		*/ "v26: mirror first-person weapon FX (muzzleflash, brass ejection, etc.) so they line up with the mirrored viewmodel. Pre-hooks FX_SpawnOrientedEffect; when the spawn origin is within r_mirrorViewmodel_mirrorFxDist of the camera AND a mirror mode is active, reflects origin/axis across the plane through the camera with normal = camera right axis. World FX (far from camera) are unaffected. 0 = off (default), 1 = on.",
+			/* default	*/ 0,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 1,
+			/* flags	*/ game::dvar_flags::saved);
+
+		dvars::r_mirrorViewmodel_mirrorFxDist = game::Dvar_RegisterFloat(
+			/* name		*/ "r_mirrorViewmodel_mirrorFxDist",
+			/* desc		*/ "v26: distance threshold (in world units, from camera origin) below which an FX spawn is considered first-person and gets mirrored. Defaults to 64 to capture muzzleflash/brass attached at view tags without affecting world FX (smoke, world muzzleflashes from other players, etc.).",
+			/* default	*/ 64.0f,
+			/* minVal	*/ 0.0f,
+			/* maxVal	*/ 4096.0f,
+			/* flags	*/ game::dvar_flags::saved);
+
+		dvars::r_mirrorViewmodel_mirrorFxLog = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_mirrorFxLog",
+			/* desc		*/ "v26: log next N first-person FX reflections to console (decremented on each event). Useful for verifying which FX are picked up by the hook.",
+			/* default	*/ 0,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 1024,
+			/* flags	*/ game::dvar_flags::none);
+
+		// Install the FX mirror detour. Safe even when r_mirrorViewmodel_mirrorFx
+		// is 0 because the pre-hook bails immediately in that case.
+		fx_mirror::install();
 
 		// increase fps cap to 125 for menus and loadscreen
 		utils::hook::set<BYTE>(0x500174 + 2, 8);
