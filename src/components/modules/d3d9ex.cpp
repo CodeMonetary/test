@@ -118,7 +118,9 @@ namespace components
 			V quad[4];
 
 			if (FAILED(dev->GetTexture(0, &source_base)) || !source_base) goto cleanup;
-			if (FAILED(source_base->QueryInterface(IID_IDirect3DTexture9, reinterpret_cast<void**>(&source_tex))) || !source_tex) goto cleanup;
+			if (source_base->GetType() != D3DRTYPE_TEXTURE) goto cleanup;
+			source_tex = static_cast<IDirect3DTexture9*>(source_base);
+			source_tex->AddRef();
 			if (FAILED(source_tex->GetSurfaceLevel(0, &source_surface)) || !source_surface) goto cleanup;
 			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
 			if (FAILED(dev->GetRenderTarget(0, &prev_color)) || !prev_color) goto cleanup;
