@@ -1513,6 +1513,172 @@ namespace components
 		}
 	}
 
+	// =====================================================================
+	// tag_mirror (v27): mirror first-person tag positions/orientations
+	// returned by CG_DObjGetWorldBoneMatrix (0x433F00) when called with
+	// the viewmodel pose. cgame's first-person muzzleflash, brass ejection,
+	// dynamic light attach, etc. all read view-bound tag positions
+	// (tag_flash, tag_brass, ...) through this function and then spawn
+	// FX/lights at those world coordinates. By mirroring the output for
+	// queries against &cgs->viewModelPose only, we move all view-attached
+	// tag-derived spawns to the mirrored side without touching any world
+	// entity tag query.
+	//
+	// Calling convention (__usercall):
+	//   eax     = cpose_t* pose
+	//   ecx     = int bone_index
+	//   esi     = float* axis (out, 3x3)
+	//   [esp+4] = DObj_s* obj
+	//   [esp+8] = float* origin (out, vec3)
+	// Caller cleans 2 stack args (cdecl-like).
+	// =====================================================================
+	namespace tag_mirror
+	{
+		static const uint32_t CG_DOBJ_GET_WORLD_BONE_MATRIX_ADDR = 0x433F00;
+		static unsigned char* g_trampoline = nullptr;
+
+		// Saved across the call. Single-threaded (D3D9 main thread), so
+		// statics are safe and the post-hook does no engine re-entrancy
+		// that could re-enter CG_DObjGetWorldBoneMatrix in the middle of
+		// our pre-hook.
+		static void*  s_pose         = nullptr;
+		static float* s_axis_out     = nullptr;
+		static float* s_origin_out   = nullptr;
+		static DWORD  s_caller_ret   = 0;
+
+		extern "C" void __cdecl tag_post_hook()
+		{
+			const int mirror_fx = (dvars::r_mirrorViewmodel_mirrorFx
+				? dvars::r_mirrorViewmodel_mirrorFx->current.integer : 0);
+			if (!mirror_fx) return;
+
+			const int rtt_on = (dvars::r_mirrorViewmodel_rtt
+				? dvars::r_mirrorViewmodel_rtt->current.integer : 0);
+			const int method = (dvars::r_mirrorViewmodel_method
+				? dvars::r_mirrorViewmodel_method->current.integer : 0);
+			if (!rtt_on && !method) return;
+
+			if (!game::cgs) return;
+
+			// Filter: only mirror tag results that were queried against the
+			// viewmodel pose. World entities (other players, vehicles, etc.)
+			// also flow through this function and must NOT be mirrored.
+			if (s_pose != static_cast<void*>(&game::cgs->viewModelPose)) return;
+
+			const float* vorg  = game::cgs->refdef.vieworg;
+			const float* right = game::cgs->refdef.viewaxis[1];
+
+			if (s_origin_out)
+			{
+				const float dx = s_origin_out[0] - vorg[0];
+				const float dy = s_origin_out[1] - vorg[1];
+				const float dz = s_origin_out[2] - vorg[2];
+				const float dot = dx * right[0] + dy * right[1] + dz * right[2];
+				s_origin_out[0] -= 2.0f * dot * right[0];
+				s_origin_out[1] -= 2.0f * dot * right[1];
+				s_origin_out[2] -= 2.0f * dot * right[2];
+			}
+
+			if (s_axis_out)
+			{
+				for (int r = 0; r < 3; ++r)
+				{
+					float* row = s_axis_out + r * 3;
+					const float dot = row[0] * right[0] + row[1] * right[1] + row[2] * right[2];
+					row[0] -= 2.0f * dot * right[0];
+					row[1] -= 2.0f * dot * right[1];
+					row[2] -= 2.0f * dot * right[2];
+				}
+			}
+
+			const int log_left = (dvars::r_mirrorViewmodel_mirrorFxLog
+				? dvars::r_mirrorViewmodel_mirrorFxLog->current.integer : 0);
+			if (log_left > 0 && dvars::r_mirrorViewmodel_mirrorFxLog && s_origin_out)
+			{
+				dvars::r_mirrorViewmodel_mirrorFxLog->current.integer = log_left - 1;
+				game::Com_PrintMessage(0, utils::va(
+					"[tag_mirror] viewmodel tag reflected: origin=(%.1f %.1f %.1f)\n",
+					s_origin_out[0], s_origin_out[1], s_origin_out[2]), 0);
+			}
+		}
+
+		// Post-stub: invoked when the original function returns (because
+		// we replaced its return address with this stub's address). EAX
+		// holds the original return value. We preserve all registers and
+		// flags around the C hook, then jump to the caller's actual
+		// return address. ESP at this point is exactly what the caller
+		// expects after the call (i.e. pointing to the stack args the
+		// caller will clean up with `add esp, 8`).
+		__declspec(naked) void getbonematrix_post_stub()
+		{
+			__asm
+			{
+				pushad;
+				pushfd;
+				call    tag_post_hook;
+				popfd;
+				popad;
+				jmp     dword ptr [s_caller_ret];
+			}
+		}
+
+		// Pre-stub: installed at 0x433F00. Saves the args we need for the
+		// post-hook, swaps the caller's return address with our post-stub,
+		// then jumps to the trampoline (which executes the original first
+		// 5 bytes and continues into the rest of the original function).
+		__declspec(naked) void getbonematrix_stub()
+		{
+			__asm
+			{
+				// Save register args (eax = pose, esi = axis_out).
+				mov     [s_pose], eax;
+				mov     [s_axis_out], esi;
+
+				// Save stack arg origin_out at [esp+8] (post-call layout).
+				// Use edx as scratch (caller-saved, not used as input).
+				mov     edx, [esp + 8];
+				mov     [s_origin_out], edx;
+
+				// Save caller's return address and replace with post-stub.
+				mov     edx, [esp];
+				mov     [s_caller_ret], edx;
+				mov     edx, offset getbonematrix_post_stub;
+				mov     [esp], edx;
+
+				// Run the original first 5 bytes via the trampoline; the
+				// trampoline tail-jumps to 0x433F00 + 5 and the original
+				// function executes normally, with eax/ecx/esi and the
+				// stack args (obj, origin) at the same positions the caller
+				// set up. Its `ret` will pop our post-stub addr -> post
+				// processing runs -> we tail-jump to caller's real return.
+				jmp     dword ptr [g_trampoline];
+			}
+		}
+
+		void install()
+		{
+			if (g_trampoline) return;
+
+			g_trampoline = static_cast<unsigned char*>(VirtualAlloc(
+				nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+			if (!g_trampoline) return;
+
+			memcpy(g_trampoline,
+				reinterpret_cast<const void*>(CG_DOBJ_GET_WORLD_BONE_MATRIX_ADDR), 5);
+
+			const intptr_t jmp_from = reinterpret_cast<intptr_t>(g_trampoline) + 5;
+			const intptr_t jmp_to   = static_cast<intptr_t>(CG_DOBJ_GET_WORLD_BONE_MATRIX_ADDR + 5);
+			g_trampoline[5] = 0xE9;
+			*reinterpret_cast<int32_t*>(g_trampoline + 6) =
+				static_cast<int32_t>(jmp_to - (jmp_from + 5));
+
+			FlushInstructionCache(GetCurrentProcess(), g_trampoline, 16);
+
+			utils::hook(CG_DOBJ_GET_WORLD_BONE_MATRIX_ADDR,
+				getbonematrix_stub, HOOK_JUMP).install()->quick();
+		}
+	}
+
 	_renderer::_renderer()
 	{
 		/*
@@ -1739,6 +1905,13 @@ namespace components
 		// Install the FX mirror detour. Safe even when r_mirrorViewmodel_mirrorFx
 		// is 0 because the pre-hook bails immediately in that case.
 		fx_mirror::install();
+
+		// v27: install the tag-mirror detour on CG_DObjGetWorldBoneMatrix.
+		// This catches first-person tag-derived FX (muzzleflash, brass,
+		// dynamic light attach, ...) that don't go through the v26
+		// FX_SpawnOrientedEffect path. Gated by the same r_mirrorViewmodel_mirrorFx
+		// dvar; the post-hook bails when the dvar is 0.
+		tag_mirror::install();
 
 		// increase fps cap to 125 for menus and loadscreen
 		utils::hook::set<BYTE>(0x500174 + 2, 8);
