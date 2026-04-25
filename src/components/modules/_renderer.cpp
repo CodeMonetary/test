@@ -1951,6 +1951,57 @@ namespace components
 			_renderer::mirror_dump_open(frames);
 		});
 
+		// v28: dump first N bytes of code at a function address (hex).
+		// Used to inspect the prologue of CoD4 cgame functions so we can
+		// build a length-aware trampoline before installing a hook there.
+		// Usage: /mirror_func_bytes <hex_addr> [<count>]
+		// e.g.   /mirror_func_bytes 0x433F00 32
+		command::add("mirror_func_bytes", "<hex_addr> [count]",
+			"Print the first [count] (default 32) bytes of code at <hex_addr> in hex. "
+			"Used to inspect a CoD4 function prologue. "
+			"e.g. /mirror_func_bytes 0x433F00 32",
+			[](command::params params)
+		{
+			if (params.length() < 2)
+			{
+				game::Com_PrintMessage(0,
+					"usage: mirror_func_bytes <hex_addr> [count]\n", 0);
+				return;
+			}
+			uint32_t addr = static_cast<uint32_t>(strtoul(params[1], nullptr, 0));
+			int count = 32;
+			if (params.length() >= 3)
+			{
+				count = atoi(params[2]);
+				if (count < 1)   count = 1;
+				if (count > 128) count = 128;
+			}
+			if (addr == 0)
+			{
+				game::Com_PrintMessage(0, "mirror_func_bytes: bad address.\n", 0);
+				return;
+			}
+			const unsigned char* p = reinterpret_cast<const unsigned char*>(addr);
+			char line[256];
+			snprintf(line, sizeof(line),
+				"[mirror_func_bytes] addr=0x%08X count=%d\n", addr, count);
+			game::Com_PrintMessage(0, line, 0);
+			// Emit 16 bytes per line.
+			for (int row = 0; row < count; row += 16)
+			{
+				int n = (row + 16 <= count) ? 16 : (count - row);
+				int off = snprintf(line, sizeof(line),
+					"  +0x%02X:", row);
+				for (int i = 0; i < n; ++i)
+				{
+					off += snprintf(line + off, sizeof(line) - off,
+						" %02X", p[row + i]);
+				}
+				snprintf(line + off, sizeof(line) - off, "\n");
+				game::Com_PrintMessage(0, line, 0);
+			}
+		});
+
 		command::add("dumpreflections", "", "", [this](command::params)
 		{
 			const auto gfx = game::DB_FindXAssetHeader(game::ASSET_TYPE_GFXWORLD, utils::va("maps/mp/%s.d3dbsp", game::Dvar_FindVar("ui_mapname")->current.string)).gfxWorld;
