@@ -110,6 +110,12 @@ namespace components
 			IDirect3DSurface9* prev_depth = nullptr;
 			IDirect3DStateBlock9* sb = nullptr;
 			bool ok = false;
+			const int blend_mode = dvars::r_mirrorViewmodel_rttBlend
+				? dvars::r_mirrorViewmodel_rttBlend->current.integer : 2;
+			const float W = (float)g_w;
+			const float H = (float)g_h;
+			struct V { float x, y, z, rhw, u, v; };
+			V quad[4];
 
 			if (FAILED(dev->GetTexture(0, &source_base)) || !source_base) goto cleanup;
 			if (FAILED(source_base->QueryInterface(IID_IDirect3DTexture9, reinterpret_cast<void**>(&source_tex))) || !source_tex) goto cleanup;
@@ -134,8 +140,6 @@ namespace components
 				D3DCOLORWRITEENABLE_BLUE | D3DCOLORWRITEENABLE_ALPHA);
 			dev->SetRenderState(D3DRS_STENCILENABLE,    FALSE);
 
-			const int blend_mode = dvars::r_mirrorViewmodel_rttBlend
-				? dvars::r_mirrorViewmodel_rttBlend->current.integer : 2;
 			dev->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
 			switch (blend_mode)
 			{
@@ -182,15 +186,10 @@ namespace components
 			dev->SetVertexDeclaration(nullptr);
 			dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
 
-			const float W = (float)g_w;
-			const float H = (float)g_h;
-			struct V { float x, y, z, rhw, u, v; };
-			V quad[4] = {
-				{ -0.5f,    -0.5f,    0.0f, 1.0f, 1.0f, 0.0f },
-				{  W-0.5f,  -0.5f,    0.0f, 1.0f, 0.0f, 0.0f },
-				{ -0.5f,     H-0.5f,  0.0f, 1.0f, 1.0f, 1.0f },
-				{  W-0.5f,   H-0.5f,  0.0f, 1.0f, 0.0f, 1.0f },
-			};
+			quad[0] = { -0.5f,    -0.5f,    0.0f, 1.0f, 1.0f, 0.0f };
+			quad[1] = {  W-0.5f,  -0.5f,    0.0f, 1.0f, 0.0f, 0.0f };
+			quad[2] = { -0.5f,     H-0.5f,  0.0f, 1.0f, 1.0f, 1.0f };
+			quad[3] = {  W-0.5f,   H-0.5f,  0.0f, 1.0f, 0.0f, 1.0f };
 			dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(V));
 			ok = true;
 
