@@ -1154,12 +1154,19 @@ namespace components
 			const float c71 = pConstantData[1];
 			const float c72 = pConstantData[2];
 			const float c73 = pConstantData[3];
-			// Tolerant equality: engine values are stable to 6+ decimals.
+			// v23: generalized tonemap-shader fingerprint. The exact values shift
+			// based on the engine's gamma/exposure setting (live match observed
+			// (-0.066, -0.066, -0.066, 2.773585), demo replay observed
+			// (-0.013772, -0.013772, -0.013772, 1.222222)) but the STRUCTURE is
+			// the same: the first three components are equal and slightly
+			// negative, the fourth is the gamma exponent in [1.0, 5.0]. This
+			// shape is unique to the final tonemap technique and never appears
+			// in stencil-shadow / post-FX bloom / world / viewmodel passes.
+			auto fapprox_eq = [](float a, float b) { float d = a - b; if (d < 0) d = -d; return d < 1e-4f; };
 			const bool is_pre_hud_signal =
-				c70 < -0.0655f && c70 > -0.0665f &&
-				c71 < -0.0655f && c71 > -0.0665f &&
-				c72 < -0.0655f && c72 > -0.0665f &&
-				c73 > 2.77f && c73 < 2.78f;
+				c70 < 0.0f && c70 > -0.2f &&
+				fapprox_eq(c70, c71) && fapprox_eq(c70, c72) &&
+				c73 > 1.0f && c73 < 5.0f;
 			if (is_pre_hud_signal)
 			{
 				// v22: do NOT composite here. The next DrawIndexedPrimitive call
