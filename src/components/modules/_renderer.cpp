@@ -1669,20 +1669,38 @@ namespace components
 		{
 			if (g_trampoline) return;
 
+			// v29: prologue of CG_DObjGetWorldBoneMatrix at 0x433F00 is:
+			//   83 EC 30           sub  esp, 0x30        (3 bytes)
+			//   53                 push ebx              (1 byte)
+			//   8B 5C 24 38        mov  ebx, [esp+0x38]  (4 bytes)  <- starts at byte 4
+			// = 8 bytes total, 3 instructions. Copying only the first 5
+			// bytes (v27..v27c approach) splits the `mov ebx, [esp+0x38]`
+			// across the trampoline boundary, leaving `8B` followed by our
+			// JMP opcode `E9` interpreted as a modrm byte. The trampoline
+			// then executes `mov ebp, ecx` (`8B E9`) and falls into the
+			// raw 4-byte JMP offset bytes as random opcodes -> CRASH on the
+			// first call to the function from the shooting code path. Fix:
+			// copy 8 bytes (3 complete instructions) and JMP to addr + 8.
+			//
+			// Trampoline layout: 8 (copied) + 5 (JMP rel32) = 13 bytes.
+			// Allocate 32 for headroom / cache-line friendliness.
+			static const int kPrologueBytes = 8;
+
 			g_trampoline = static_cast<unsigned char*>(VirtualAlloc(
-				nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+				nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
 			if (!g_trampoline) return;
 
 			memcpy(g_trampoline,
-				reinterpret_cast<const void*>(CG_DOBJ_GET_WORLD_BONE_MATRIX_ADDR), 5);
+				reinterpret_cast<const void*>(CG_DOBJ_GET_WORLD_BONE_MATRIX_ADDR),
+				kPrologueBytes);
 
-			const intptr_t jmp_from = reinterpret_cast<intptr_t>(g_trampoline) + 5;
-			const intptr_t jmp_to   = static_cast<intptr_t>(CG_DOBJ_GET_WORLD_BONE_MATRIX_ADDR + 5);
-			g_trampoline[5] = 0xE9;
-			*reinterpret_cast<int32_t*>(g_trampoline + 6) =
+			const intptr_t jmp_from = reinterpret_cast<intptr_t>(g_trampoline) + kPrologueBytes;
+			const intptr_t jmp_to   = static_cast<intptr_t>(CG_DOBJ_GET_WORLD_BONE_MATRIX_ADDR + kPrologueBytes);
+			g_trampoline[kPrologueBytes] = 0xE9;
+			*reinterpret_cast<int32_t*>(g_trampoline + kPrologueBytes + 1) =
 				static_cast<int32_t>(jmp_to - (jmp_from + 5));
 
-			FlushInstructionCache(GetCurrentProcess(), g_trampoline, 16);
+			FlushInstructionCache(GetCurrentProcess(), g_trampoline, 32);
 
 			utils::hook(CG_DOBJ_GET_WORLD_BONE_MATRIX_ADDR,
 				getbonematrix_stub, HOOK_JUMP).install()->quick();
@@ -1924,15 +1942,16 @@ namespace components
 		// is 0 because the pre-hook bails immediately in that case.
 		fx_mirror::install();
 
-		// v27c: tag_mirror::install() is DISABLED. Hooking 0x433F00 turned
-		// out to be incompatible with this build of iw3mp.exe during weapon
-		// firing (the engine crashes on the very first call to the function
-		// on the shooting code path even with mirrorFx=0, i.e. with the hook
-		// in pure pass-through mode and not modifying any output). The dvars
-		// and tag_replacement code are kept compiled in so we can re-enable
-		// it from a future patch once we have a safer hook point or a
-		// length-disassembling trampoline. For now: shoot freely.
-		// tag_mirror::install();
+		// v29: re-enable tag_mirror::install() with an 8-byte
+		// instruction-aligned trampoline. v27..v27c crashed because the
+		// 5-byte trampoline split the `mov ebx, [esp+0x38]` instruction at
+		// 0x433F04 (CG_DObjGetWorldBoneMatrix prologue is 3+1+4=8 bytes,
+		// not 5). The new install copies 8 bytes (sub+push+mov), then JMPs
+		// to addr+8, so the trampoline always executes complete
+		// instructions. Gated by r_mirrorViewmodel_mirrorFx (default 0); the
+		// post-hook bails immediately when the dvar is 0, so the hook is a
+		// pure pass-through unless explicitly enabled.
+		tag_mirror::install();
 
 		// increase fps cap to 125 for menus and loadscreen
 		utils::hook::set<BYTE>(0x500174 + 2, 8);
