@@ -199,6 +199,7 @@ namespace dvars
 	extern game::dvar_s* r_mirrorViewmodel_mirrorFx;
 	extern game::dvar_s* r_mirrorViewmodel_mirrorFxDist;
 	extern game::dvar_s* r_mirrorViewmodel_mirrorFxLog;
+	extern game::dvar_s* r_mirrorViewmodel_mirrorFxAxis;
 	extern game::dvar_s* bg_bobIdle;
 
 	// Debug collision

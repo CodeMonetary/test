@@ -193,6 +193,7 @@ namespace dvars
 	game::dvar_s* r_mirrorViewmodel_mirrorFx = nullptr;
 	game::dvar_s* r_mirrorViewmodel_mirrorFxDist = nullptr;
 	game::dvar_s* r_mirrorViewmodel_mirrorFxLog = nullptr;
+	game::dvar_s* r_mirrorViewmodel_mirrorFxAxis = nullptr;
 	game::dvar_s* bg_bobIdle = nullptr;
 	
 	// Debug Collision

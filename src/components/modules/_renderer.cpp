@@ -1602,7 +1602,17 @@ namespace components
 				origin[2] -= 2.0f * dot * right[2];
 			}
 
-			if (axis)
+			// Reflecting the 3x3 axis produces a left-handed (det = -1)
+			// basis. Many engine consumers (AxisToAngles, FX axis-aligned
+			// sprite math, etc.) assume right-handedness and crash or
+			// blow up on improper rotations. Origin mirroring alone is
+			// sufficient for camera-billboard FX (muzzleflash sprite,
+			// tracer line) — they spawn at the mirrored position and
+			// face the camera regardless. Only mirror the axis when the
+			// user explicitly opts in via r_mirrorViewmodel_mirrorFxAxis.
+			const int mirror_axis = (dvars::r_mirrorViewmodel_mirrorFxAxis
+				? dvars::r_mirrorViewmodel_mirrorFxAxis->current.integer : 0);
+			if (axis && mirror_axis)
 			{
 				for (int r = 0; r < 3; ++r)
 				{
@@ -1901,6 +1911,14 @@ namespace components
 			/* minVal	*/ 0,
 			/* maxVal	*/ 1024,
 			/* flags	*/ game::dvar_flags::none);
+
+		dvars::r_mirrorViewmodel_mirrorFxAxis = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_mirrorFxAxis",
+			/* desc		*/ "v27a: also reflect the 3x3 axis matrix (orientation) of mirrored viewmodel tag results, in addition to the origin. Reflecting the axis produces a left-handed (det = -1) basis which can crash the engine in some FX paths (AxisToAngles, axis-aligned sprite math, etc.). Origin-only mirroring is sufficient for camera-billboard FX (muzzleflash sprite, brass spawn position, tracer line origin) which look correct because they billboard to the camera. 0 = mirror origin only (default, safe). 1 = mirror origin + axis (full reflection, may crash on shooting depending on weapon FX).",
+			/* default	*/ 0,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 1,
+			/* flags	*/ game::dvar_flags::saved);
 
 		// Install the FX mirror detour. Safe even when r_mirrorViewmodel_mirrorFx
 		// is 0 because the pre-hook bails immediately in that case.
