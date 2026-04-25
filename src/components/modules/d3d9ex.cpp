@@ -835,10 +835,14 @@ namespace components
 		const float* out_data = pConstantData;
 		// is_mtx_at_zero detects c0-c3 matrix uploads (used for dhp/stdp arming logic only)
 		const bool is_mtx_at_zero = (pConstantData && StartRegister == 0 && Vector4fCount == 4);
-		float c23 = 0.0f;
-		if (is_mtx_at_zero) { c23 = pConstantData[11]; } // c2[3]
+		float c22 = 0.0f, c23 = 0.0f;
+		if (is_mtx_at_zero) { c22 = pConstantData[10]; c23 = pConstantData[11]; } // c2[2], c2[3]
 		const bool is_depth_hack_proj = is_mtx_at_zero && (c23 < -0.02f && c23 > -0.50f);
 		const bool is_std_proj        = is_mtx_at_zero && (c23 < -1.00f);
+		// 2D HUD ortho matrix signature: c2 = (0, 0, 0, 1). Used for screen-space
+		// HUD overlays (timer, ammo counter, weapon icons). The first such upload
+		// in a frame marks the start of HUD draws after world+post-FX are done.
+		const bool is_hud_ortho = is_mtx_at_zero && (c23 > 0.5f) && (fabsf(c22) < 1e-3f);
 
 		const int flipVSCF = dvars::r_mirrorViewmodel_flipVSCF
 			? dvars::r_mirrorViewmodel_flipVSCF->current.integer : 0;
@@ -861,8 +865,9 @@ namespace components
 
 		// v15: render-to-texture mirror, segment-aware.
 		// dhp upload: bind off-screen color+depth (clear once per frame).
-		// stdp upload: switch back to engine RT (no composite). Final composite
-		// happens once at EndScene.
+		// stdp upload: switch back to engine RT (no composite).
+		// v18: composite at the first HUD ortho upload (after world+post-FX,
+		// before HUD draws). EndScene is a fallback if no HUD ortho seen.
 		const int rtt_on = dvars::r_mirrorViewmodel_rtt
 			? dvars::r_mirrorViewmodel_rtt->current.integer : 0;
 		if (rtt_on)
@@ -879,6 +884,18 @@ namespace components
 			else if (is_mtx_at_zero && mirror_rtt::g_in_segment)
 			{
 				mirror_rtt::end_segment(m_pIDirect3DDevice9);
+			}
+
+			// v18: composite the accumulated viewmodel render right before HUD draws
+			// start. Without this the composite ran at EndScene (after the engine had
+			// already drawn HUD elements like the round timer / weapon icons / ammo
+			// counter), so the gun blit ended up painted on top of HUD instead of
+			// behind it. Detect the first 2D screen-space ortho upload (c2 = 0,0,0,1)
+			// and composite there. Subsequent ortho uploads in the same frame are
+			// no-ops because final_composite clears g_pass_active.
+			if (is_hud_ortho && (mirror_rtt::g_pass_active || mirror_rtt::g_in_segment))
+			{
+				mirror_rtt::final_composite(m_pIDirect3DDevice9);
 			}
 		}
 
