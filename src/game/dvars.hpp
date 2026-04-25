@@ -191,6 +191,7 @@ namespace dvars
 	extern game::dvar_s* r_mirrorViewmodel_flipFollow;
 	extern game::dvar_s* r_mirrorViewmodel_flipAxis;
 	extern game::dvar_s* r_mirrorViewmodel_flipReg;
+	extern game::dvar_s* r_mirrorViewmodel_rtt;
 	extern game::dvar_s* bg_bobIdle;
 
 	// Debug collision

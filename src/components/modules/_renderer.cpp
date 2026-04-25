@@ -1522,6 +1522,14 @@ namespace components
 			/* maxVal	*/ 64,
 			/* flags	*/ game::dvar_flags::saved);
 
+		dvars::r_mirrorViewmodel_rtt = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_rtt",
+			/* desc		*/ "v12: render-to-texture mirror mode. 0 = off (use matrix-flip path: r_mirrorViewmodel_method / flipVSCF). 1 = on. When on, the viewmodel is rendered unflipped to an off-screen texture, then composited back onto the back-buffer with horizontally inverted UV. This produces a pixel-perfect mirror with NO handedness inversion (tangents/normals/cull stay correct). Disables matrix-flip path when active.",
+			/* default	*/ 0,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 1,
+			/* flags	*/ game::dvar_flags::saved);
+
 		// increase fps cap to 125 for menus and loadscreen
 		utils::hook::set<BYTE>(0x500174 + 2, 8);
 		utils::hook::set<BYTE>(0x500177 + 2, 8);

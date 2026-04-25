@@ -9,6 +9,174 @@ namespace components
 	extern void mirror_dump_inc_pscf();
 	extern void mirror_dump_inc_draw();
 
+	// ----------------------------------------------------------------------
+	// r_mirrorViewmodel v12: render-to-texture mirror.
+	//
+	// On the depth-hack proj signature on c0-c3 (start of viewmodel pass),
+	// redirect color+depth to an off-screen texture matching back-buffer
+	// size. The viewmodel renders unflipped (matrix-flip is disabled in
+	// rtt mode), so tangents/normals/cull stay correct internally. When the
+	// std-proj signature returns (start of post-VM world/HUD pass), restore
+	// back-buffer and composite the off-screen texture onto it with U flipped.
+	// Result: pixel-perfect mirror, no handedness artifacts.
+	// ----------------------------------------------------------------------
+	namespace mirror_rtt
+	{
+		static IDirect3DTexture9* g_tex          = nullptr;
+		static IDirect3DSurface9* g_color        = nullptr;
+		static IDirect3DSurface9* g_depth        = nullptr;
+		static IDirect3DSurface9* g_saved_color  = nullptr;
+		static IDirect3DSurface9* g_saved_depth  = nullptr;
+		static int  g_w                          = 0;
+		static int  g_h                          = 0;
+		static bool g_in_pass                    = false;
+
+		static void release_targets()
+		{
+			if (g_color) { g_color->Release(); g_color = nullptr; }
+			if (g_depth) { g_depth->Release(); g_depth = nullptr; }
+			if (g_tex)   { g_tex->Release();   g_tex   = nullptr; }
+			g_w = g_h = 0;
+		}
+
+		static bool ensure_targets(IDirect3DDevice9* dev)
+		{
+			IDirect3DSurface9* bb = nullptr;
+			if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return false;
+			D3DSURFACE_DESC bd; bb->GetDesc(&bd); bb->Release();
+			if (g_tex && (int)bd.Width == g_w && (int)bd.Height == g_h) return true;
+			release_targets();
+			if (FAILED(dev->CreateTexture(bd.Width, bd.Height, 1, D3DUSAGE_RENDERTARGET,
+				D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_tex, nullptr))) return false;
+			if (FAILED(g_tex->GetSurfaceLevel(0, &g_color))) { release_targets(); return false; }
+			if (FAILED(dev->CreateDepthStencilSurface(bd.Width, bd.Height, D3DFMT_D24S8,
+				D3DMULTISAMPLE_NONE, 0, TRUE, &g_depth, nullptr))) { release_targets(); return false; }
+			g_w = (int)bd.Width;
+			g_h = (int)bd.Height;
+			return true;
+		}
+
+		static void begin_pass(IDirect3DDevice9* dev)
+		{
+			if (g_in_pass) return;
+			if (!ensure_targets(dev)) return;
+			if (FAILED(dev->GetRenderTarget(0, &g_saved_color))) { g_saved_color = nullptr; return; }
+			if (FAILED(dev->GetDepthStencilSurface(&g_saved_depth))) { g_saved_depth = nullptr; }
+			dev->SetRenderTarget(0, g_color);
+			dev->SetDepthStencilSurface(g_depth);
+			dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL,
+				0x00000000, 1.0f, 0);
+			g_in_pass = true;
+		}
+
+		static void end_pass_and_composite(IDirect3DDevice9* dev)
+		{
+			if (!g_in_pass) return;
+			g_in_pass = false;
+
+			if (g_saved_color) { dev->SetRenderTarget(0, g_saved_color); g_saved_color->Release(); g_saved_color = nullptr; }
+			if (g_saved_depth) { dev->SetDepthStencilSurface(g_saved_depth); g_saved_depth->Release(); g_saved_depth = nullptr; }
+			else                 dev->SetDepthStencilSurface(nullptr);
+
+			DWORD oldZE, oldZW, oldAB, oldSB, oldDB, oldCM, oldL, oldFE, oldAT, oldSrgb;
+			DWORD oldStg0_CO, oldStg0_CA1, oldStg0_AO, oldStg0_AA1;
+			DWORD oldSamp0_min, oldSamp0_mag, oldSamp0_addrU, oldSamp0_addrV;
+			IDirect3DBaseTexture9* oldTex = nullptr;
+			DWORD oldFVF;
+			IDirect3DVertexShader9* oldVS = nullptr;
+			IDirect3DPixelShader9*  oldPS = nullptr;
+
+			dev->GetRenderState(D3DRS_ZENABLE,           &oldZE);
+			dev->GetRenderState(D3DRS_ZWRITEENABLE,      &oldZW);
+			dev->GetRenderState(D3DRS_ALPHABLENDENABLE,  &oldAB);
+			dev->GetRenderState(D3DRS_SRCBLEND,          &oldSB);
+			dev->GetRenderState(D3DRS_DESTBLEND,         &oldDB);
+			dev->GetRenderState(D3DRS_CULLMODE,          &oldCM);
+			dev->GetRenderState(D3DRS_LIGHTING,          &oldL);
+			dev->GetRenderState(D3DRS_FOGENABLE,         &oldFE);
+			dev->GetRenderState(D3DRS_ALPHATESTENABLE,   &oldAT);
+			dev->GetRenderState(D3DRS_SRGBWRITEENABLE,   &oldSrgb);
+			dev->GetTextureStageState(0, D3DTSS_COLOROP,   &oldStg0_CO);
+			dev->GetTextureStageState(0, D3DTSS_COLORARG1, &oldStg0_CA1);
+			dev->GetTextureStageState(0, D3DTSS_ALPHAOP,   &oldStg0_AO);
+			dev->GetTextureStageState(0, D3DTSS_ALPHAARG1, &oldStg0_AA1);
+			dev->GetSamplerState(0, D3DSAMP_MINFILTER, &oldSamp0_min);
+			dev->GetSamplerState(0, D3DSAMP_MAGFILTER, &oldSamp0_mag);
+			dev->GetSamplerState(0, D3DSAMP_ADDRESSU,  &oldSamp0_addrU);
+			dev->GetSamplerState(0, D3DSAMP_ADDRESSV,  &oldSamp0_addrV);
+			dev->GetTexture(0, &oldTex);
+			dev->GetFVF(&oldFVF);
+			dev->GetVertexShader(&oldVS);
+			dev->GetPixelShader(&oldPS);
+
+			dev->SetVertexShader(nullptr);
+			dev->SetPixelShader(nullptr);
+			dev->SetRenderState(D3DRS_ZENABLE,          FALSE);
+			dev->SetRenderState(D3DRS_ZWRITEENABLE,     FALSE);
+			dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+			dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_SRCALPHA);
+			dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_INVSRCALPHA);
+			dev->SetRenderState(D3DRS_CULLMODE,         D3DCULL_NONE);
+			dev->SetRenderState(D3DRS_LIGHTING,         FALSE);
+			dev->SetRenderState(D3DRS_FOGENABLE,        FALSE);
+			dev->SetRenderState(D3DRS_ALPHATESTENABLE,  FALSE);
+			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,  FALSE);
+			dev->SetTextureStageState(0, D3DTSS_COLOROP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAOP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+			dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+			dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSU,  D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSV,  D3DTADDRESS_CLAMP);
+			dev->SetTexture(0, g_tex);
+			dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+
+			const float W = (float)g_w;
+			const float H = (float)g_h;
+			struct V { float x, y, z, rhw, u, v; };
+			V quad[4] = {
+				{ -0.5f,    -0.5f,    0.0f, 1.0f, 1.0f, 0.0f },
+				{  W-0.5f,  -0.5f,    0.0f, 1.0f, 0.0f, 0.0f },
+				{ -0.5f,     H-0.5f,  0.0f, 1.0f, 1.0f, 1.0f },
+				{  W-0.5f,   H-0.5f,  0.0f, 1.0f, 0.0f, 1.0f },
+			};
+			dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(V));
+
+			dev->SetTexture(0, oldTex);
+			if (oldTex) oldTex->Release();
+			dev->SetFVF(oldFVF);
+			dev->SetVertexShader(oldVS); if (oldVS) oldVS->Release();
+			dev->SetPixelShader(oldPS);  if (oldPS) oldPS->Release();
+			dev->SetRenderState(D3DRS_ZENABLE,          oldZE);
+			dev->SetRenderState(D3DRS_ZWRITEENABLE,     oldZW);
+			dev->SetRenderState(D3DRS_ALPHABLENDENABLE, oldAB);
+			dev->SetRenderState(D3DRS_SRCBLEND,         oldSB);
+			dev->SetRenderState(D3DRS_DESTBLEND,        oldDB);
+			dev->SetRenderState(D3DRS_CULLMODE,         oldCM);
+			dev->SetRenderState(D3DRS_LIGHTING,         oldL);
+			dev->SetRenderState(D3DRS_FOGENABLE,        oldFE);
+			dev->SetRenderState(D3DRS_ALPHATESTENABLE,  oldAT);
+			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,  oldSrgb);
+			dev->SetTextureStageState(0, D3DTSS_COLOROP,   oldStg0_CO);
+			dev->SetTextureStageState(0, D3DTSS_COLORARG1, oldStg0_CA1);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAOP,   oldStg0_AO);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, oldStg0_AA1);
+			dev->SetSamplerState(0, D3DSAMP_MINFILTER, oldSamp0_min);
+			dev->SetSamplerState(0, D3DSAMP_MAGFILTER, oldSamp0_mag);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSU,  oldSamp0_addrU);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSV,  oldSamp0_addrV);
+		}
+
+		static void on_device_reset()
+		{
+			if (g_saved_color) { g_saved_color->Release(); g_saved_color = nullptr; }
+			if (g_saved_depth) { g_saved_depth->Release(); g_saved_depth = nullptr; }
+			g_in_pass = false;
+			release_targets();
+		}
+	}
+
 #pragma region D3D9Device
 
 	HRESULT d3d9ex::D3D9Device::QueryInterface(REFIID riid, void** ppvObj)
@@ -102,6 +270,9 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::Reset(D3DPRESENT_PARAMETERS* pPresentationParameters)
 	{
+		// r_mirrorViewmodel v12: release POOL_DEFAULT off-screen targets before Reset.
+		mirror_rtt::on_device_reset();
+
 		if (components::active.gui)
 		{
 			if (GGUI_READY)
@@ -269,6 +440,14 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::EndScene()
 	{
+		// r_mirrorViewmodel v12 safety net: if a viewmodel pass was opened but the
+		// stdp signature never fired this frame, composite & restore RT before EndScene
+		// so we don't present an off-screen target.
+		if (mirror_rtt::g_in_pass)
+		{
+			mirror_rtt::end_pass_and_composite(m_pIDirect3DDevice9);
+		}
+
 		if (components::active.gui)
 		{
 			gui::render_loop();
@@ -656,11 +835,29 @@ namespace components
 			_renderer::mirror_vscf_follow_remaining = 0;
 		}
 
+		// v12: render-to-texture mirror.
+		// On dhp begin: redirect color+depth to off-screen vm texture.
+		// On stdp return: restore back-buffer and composite vm texture with U flipped.
+		const int rtt_on = dvars::r_mirrorViewmodel_rtt
+			? dvars::r_mirrorViewmodel_rtt->current.integer : 0;
+		if (rtt_on)
+		{
+			if (is_depth_hack_proj)
+			{
+				mirror_rtt::begin_pass(m_pIDirect3DDevice9);
+			}
+			else if (is_std_proj && mirror_rtt::g_in_pass)
+			{
+				mirror_rtt::end_pass_and_composite(m_pIDirect3DDevice9);
+			}
+		}
+
 		// Apply flip if: this upload is a 4-row matrix at the configured flipReg AND we are in
 		// a gun pass (dhp itself, or within follow window when flipVSCF==2).
+		// When rtt is on, the off-screen render path replaces matrix-flip; disable it.
 		const bool is_target_mtx = (pConstantData && Vector4fCount == 4 && (int)StartRegister == flipReg);
 		bool apply_flip = false;
-		if (is_target_mtx && flipVSCF != 0)
+		if (is_target_mtx && flipVSCF != 0 && !rtt_on)
 		{
 			if (flipReg == 0)
 			{
