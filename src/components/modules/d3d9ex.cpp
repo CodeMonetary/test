@@ -1077,6 +1077,43 @@ namespace components
 			}
 		}
 
+		// v20: detect the engine's final post-FX/HUD-boundary pixel-shader
+		// constant. Across maps and graphic configs the engine uploads a
+		// PSCF c7 = (-0.066, -0.066, -0.066, 2.773585) exactly once per
+		// frame, immediately before the first HUD ortho c0-c3 upload.
+		// This is a far more reliable HUD-start signal than the 2D ortho
+		// matrix shape that v18 tried to use - in-frame stencil-shadow and
+		// post-FX passes share the ortho signature, but they do NOT share
+		// these specific PSCF constants. Compositing here means the gun
+		// is on the back-buffer before HUD draws, so the HUD overlays the
+		// gun (timer, C4, ammo no longer hidden behind the mirrored view).
+		// Falls back to the EndScene composite if this signal is absent
+		// (e.g. the technique is bypassed by a graphics setting).
+		const int rtt_on_pscf = dvars::r_mirrorViewmodel_rtt
+			? dvars::r_mirrorViewmodel_rtt->current.integer : 0;
+		const int rtt_early = dvars::r_mirrorViewmodel_rttEarlyComposite
+			? dvars::r_mirrorViewmodel_rttEarlyComposite->current.integer : 1;
+		if (rtt_on_pscf && rtt_early != 0 && pConstantData
+			&& StartRegister == 7 && Vector4fCount >= 1
+			&& (mirror_rtt::g_pass_active || mirror_rtt::g_in_segment))
+		{
+			const float c70 = pConstantData[0];
+			const float c71 = pConstantData[1];
+			const float c72 = pConstantData[2];
+			const float c73 = pConstantData[3];
+			// Tolerant equality: engine values are stable to 6+ decimals.
+			const bool is_pre_hud_signal =
+				c70 < -0.0655f && c70 > -0.0665f &&
+				c71 < -0.0655f && c71 > -0.0665f &&
+				c72 < -0.0655f && c72 > -0.0665f &&
+				c73 > 2.77f && c73 < 2.78f;
+			if (is_pre_hud_signal)
+			{
+				if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
+				mirror_rtt::final_composite(m_pIDirect3DDevice9);
+			}
+		}
+
 		return m_pIDirect3DDevice9->SetPixelShaderConstantF(StartRegister, pConstantData, Vector4fCount);
 	}
 

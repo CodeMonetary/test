@@ -1538,6 +1538,14 @@ namespace components
 			/* maxVal	*/ 3,
 			/* flags	*/ game::dvar_flags::saved);
 
+		dvars::r_mirrorViewmodel_rttEarlyComposite = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_rttEarlyComposite",
+			/* desc		*/ "v20: composite the mirrored viewmodel before the HUD (lets the HUD draw on top of the gun instead of being covered). Detection signal is the engine's final post-FX pixel-shader constant (PSCF c7 = -0.066,-0.066,-0.066,2.773585) which fires once per frame immediately before the first HUD ortho upload. 0 = composite at EndScene only (gun covers HUD). 1 = composite at the post-FX/HUD boundary (HUD on top of gun, default). 2 = composite at both points (diagnostic).",
+			/* default	*/ 1,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 2,
+			/* flags	*/ game::dvar_flags::saved);
+
 		// increase fps cap to 125 for menus and loadscreen
 		utils::hook::set<BYTE>(0x500174 + 2, 8);
 		utils::hook::set<BYTE>(0x500177 + 2, 8);
