@@ -10,15 +10,22 @@ namespace components
 	extern void mirror_dump_inc_draw();
 
 	// ----------------------------------------------------------------------
-	// r_mirrorViewmodel v12: render-to-texture mirror.
+	// r_mirrorViewmodel: render-to-texture mirror.
 	//
-	// On the depth-hack proj signature on c0-c3 (start of viewmodel pass),
-	// redirect color+depth to an off-screen texture matching back-buffer
-	// size. The viewmodel renders unflipped (matrix-flip is disabled in
-	// rtt mode), so tangents/normals/cull stay correct internally. When the
-	// std-proj signature returns (start of post-VM world/HUD pass), restore
-	// back-buffer and composite the off-screen texture onto it with U flipped.
-	// Result: pixel-perfect mirror, no handedness artifacts.
+	// On the depth-hack proj signature on c0-c3 (start of a viewmodel pass
+	// segment), redirect color+depth to an off-screen texture matching
+	// back-buffer size. The viewmodel renders unflipped (matrix-flip is
+	// disabled in rtt mode), so tangents/normals/cull stay correct
+	// internally. On the std-proj signature, switch back to the back-buffer
+	// so the engine's world/HUD draws hit the visible target.
+	//
+	// v15: IW3 splits the viewmodel into TWO dhp/stdp segments per frame
+	// (z-prefill before world, lit pass after world). Compositing at the
+	// first stdp wrote a half-rendered gun (z-prefill only, mostly black)
+	// onto the back-buffer, which is what produced the "ghost" appearance
+	// in v12-v14. We now accumulate ALL segments into the off-screen target
+	// (without clearing between segments so depth from z-prefill is reused
+	// by the lit pass), and composite once at EndScene.
 	// ----------------------------------------------------------------------
 	namespace mirror_rtt
 	{
@@ -29,7 +36,8 @@ namespace components
 		static IDirect3DSurface9* g_saved_depth  = nullptr;
 		static int  g_w                          = 0;
 		static int  g_h                          = 0;
-		static bool g_in_pass                    = false;
+		static bool g_pass_active                = false; // first dhp seen this frame; cleared after final composite
+		static bool g_in_segment                 = false; // off-screen RT currently bound
 
 		static void release_targets()
 		{
@@ -56,29 +64,44 @@ namespace components
 			return true;
 		}
 
-		static void begin_pass(IDirect3DDevice9* dev)
+		// Bind off-screen color+depth so the next batch of viewmodel draws lands there.
+		// On the FIRST segment of a frame, also clear the off-screen target. Subsequent
+		// segments must NOT clear, so the lit pass z-tests against z-prefill depth and
+		// composes on top of the z-prefill color in the same target.
+		static void begin_segment(IDirect3DDevice9* dev)
 		{
-			if (g_in_pass) return;
+			if (g_in_segment) return;
 			if (!ensure_targets(dev)) return;
 			if (FAILED(dev->GetRenderTarget(0, &g_saved_color))) { g_saved_color = nullptr; return; }
 			if (FAILED(dev->GetDepthStencilSurface(&g_saved_depth))) { g_saved_depth = nullptr; }
 			dev->SetRenderTarget(0, g_color);
 			dev->SetDepthStencilSurface(g_depth);
-			dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL,
-				0x00000000, 1.0f, 0);
-			g_in_pass = true;
+			if (!g_pass_active)
+			{
+				dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL,
+					0x00000000, 1.0f, 0);
+				g_pass_active = true;
+			}
+			g_in_segment = true;
 		}
 
-		static void end_pass_and_composite(IDirect3DDevice9* dev)
+		// Switch back to engine's color+depth so post-viewmodel world draws are visible.
+		// Does NOT composite; the off-screen target is preserved for further segments
+		// or for the EndScene final composite.
+		static void end_segment(IDirect3DDevice9* dev)
 		{
-			if (!g_in_pass) return;
-			g_in_pass = false;
-
-			// Restore engine's render target and depth surface first; state blocks do
-			// not capture the render target, so we manage it manually.
+			if (!g_in_segment) return;
+			g_in_segment = false;
 			if (g_saved_color) { dev->SetRenderTarget(0, g_saved_color); g_saved_color->Release(); g_saved_color = nullptr; }
 			if (g_saved_depth) { dev->SetDepthStencilSurface(g_saved_depth); g_saved_depth->Release(); g_saved_depth = nullptr; }
 			else                 dev->SetDepthStencilSurface(nullptr);
+		}
+
+		static void final_composite(IDirect3DDevice9* dev)
+		{
+			if (g_in_segment) end_segment(dev); // safety net (no stdp seen before EndScene)
+			if (!g_pass_active) return;
+			g_pass_active = false;
 
 			// v14: capture ALL device state in a state block. After the composite we
 			// Apply() the block which restores every render state, texture stage,
@@ -171,7 +194,8 @@ namespace components
 		{
 			if (g_saved_color) { g_saved_color->Release(); g_saved_color = nullptr; }
 			if (g_saved_depth) { g_saved_depth->Release(); g_saved_depth = nullptr; }
-			g_in_pass = false;
+			g_pass_active = false;
+			g_in_segment  = false;
 			release_targets();
 		}
 	}
@@ -439,12 +463,13 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::EndScene()
 	{
-		// r_mirrorViewmodel v12 safety net: if a viewmodel pass was opened but the
-		// stdp signature never fired this frame, composite & restore RT before EndScene
-		// so we don't present an off-screen target.
-		if (mirror_rtt::g_in_pass)
+		// r_mirrorViewmodel v15: composite the accumulated viewmodel render once per
+		// frame, regardless of how many dhp/stdp segments fired. Compositing at every
+		// stdp transition (v12-v14) only blitted partial gun renders (z-prefill alone
+		// for the first segment) and produced the "ghost" appearance.
+		if (mirror_rtt::g_pass_active || mirror_rtt::g_in_segment)
 		{
-			mirror_rtt::end_pass_and_composite(m_pIDirect3DDevice9);
+			mirror_rtt::final_composite(m_pIDirect3DDevice9);
 		}
 
 		if (components::active.gui)
@@ -834,20 +859,21 @@ namespace components
 			_renderer::mirror_vscf_follow_remaining = 0;
 		}
 
-		// v12: render-to-texture mirror.
-		// On dhp begin: redirect color+depth to off-screen vm texture.
-		// On stdp return: restore back-buffer and composite vm texture with U flipped.
+		// v15: render-to-texture mirror, segment-aware.
+		// dhp upload: bind off-screen color+depth (clear once per frame).
+		// stdp upload: switch back to engine RT (no composite). Final composite
+		// happens once at EndScene.
 		const int rtt_on = dvars::r_mirrorViewmodel_rtt
 			? dvars::r_mirrorViewmodel_rtt->current.integer : 0;
 		if (rtt_on)
 		{
 			if (is_depth_hack_proj)
 			{
-				mirror_rtt::begin_pass(m_pIDirect3DDevice9);
+				mirror_rtt::begin_segment(m_pIDirect3DDevice9);
 			}
-			else if (is_std_proj && mirror_rtt::g_in_pass)
+			else if (is_std_proj && mirror_rtt::g_in_segment)
 			{
-				mirror_rtt::end_pass_and_composite(m_pIDirect3DDevice9);
+				mirror_rtt::end_segment(m_pIDirect3DDevice9);
 			}
 		}
 
