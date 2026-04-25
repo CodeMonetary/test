@@ -74,44 +74,20 @@ namespace components
 			if (!g_in_pass) return;
 			g_in_pass = false;
 
+			// Restore engine's render target and depth surface first; state blocks do
+			// not capture the render target, so we manage it manually.
 			if (g_saved_color) { dev->SetRenderTarget(0, g_saved_color); g_saved_color->Release(); g_saved_color = nullptr; }
 			if (g_saved_depth) { dev->SetDepthStencilSurface(g_saved_depth); g_saved_depth->Release(); g_saved_depth = nullptr; }
 			else                 dev->SetDepthStencilSurface(nullptr);
 
-			DWORD oldZE, oldZW, oldAB, oldSB, oldDB, oldCM, oldL, oldFE, oldAT, oldSrgb;
-			DWORD oldStg0_CO, oldStg0_CA1, oldStg0_AO, oldStg0_AA1;
-			DWORD oldSamp0_min, oldSamp0_mag, oldSamp0_addrU, oldSamp0_addrV;
-			IDirect3DBaseTexture9* oldTex = nullptr;
-			DWORD oldFVF;
-			IDirect3DVertexShader9* oldVS = nullptr;
-			IDirect3DPixelShader9*  oldPS = nullptr;
-
-			dev->GetRenderState(D3DRS_ZENABLE,           &oldZE);
-			dev->GetRenderState(D3DRS_ZWRITEENABLE,      &oldZW);
-			dev->GetRenderState(D3DRS_ALPHABLENDENABLE,  &oldAB);
-			dev->GetRenderState(D3DRS_SRCBLEND,          &oldSB);
-			dev->GetRenderState(D3DRS_DESTBLEND,         &oldDB);
-			dev->GetRenderState(D3DRS_CULLMODE,          &oldCM);
-			dev->GetRenderState(D3DRS_LIGHTING,          &oldL);
-			dev->GetRenderState(D3DRS_FOGENABLE,         &oldFE);
-			dev->GetRenderState(D3DRS_ALPHATESTENABLE,   &oldAT);
-			dev->GetRenderState(D3DRS_SRGBWRITEENABLE,   &oldSrgb);
-			DWORD oldBlendOp, oldAlphaRef, oldAlphaFunc;
-			dev->GetRenderState(D3DRS_BLENDOP,    &oldBlendOp);
-			dev->GetRenderState(D3DRS_ALPHAREF,   &oldAlphaRef);
-			dev->GetRenderState(D3DRS_ALPHAFUNC,  &oldAlphaFunc);
-			dev->GetTextureStageState(0, D3DTSS_COLOROP,   &oldStg0_CO);
-			dev->GetTextureStageState(0, D3DTSS_COLORARG1, &oldStg0_CA1);
-			dev->GetTextureStageState(0, D3DTSS_ALPHAOP,   &oldStg0_AO);
-			dev->GetTextureStageState(0, D3DTSS_ALPHAARG1, &oldStg0_AA1);
-			dev->GetSamplerState(0, D3DSAMP_MINFILTER, &oldSamp0_min);
-			dev->GetSamplerState(0, D3DSAMP_MAGFILTER, &oldSamp0_mag);
-			dev->GetSamplerState(0, D3DSAMP_ADDRESSU,  &oldSamp0_addrU);
-			dev->GetSamplerState(0, D3DSAMP_ADDRESSV,  &oldSamp0_addrV);
-			dev->GetTexture(0, &oldTex);
-			dev->GetFVF(&oldFVF);
-			dev->GetVertexShader(&oldVS);
-			dev->GetPixelShader(&oldPS);
+			// v14: capture ALL device state in a state block. After the composite we
+			// Apply() the block which restores every render state, texture stage,
+			// sampler, stream source, index buffer, vertex/pixel shader, FVF, etc.
+			// This is necessary because DrawPrimitiveUP sets stream source 0 to NULL
+			// which was causing subsequent engine draws to silently fail (observed as
+			// world textures disappearing after the gun composite in v13).
+			IDirect3DStateBlock9* sb = nullptr;
+			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
 
 			dev->SetVertexShader(nullptr);
 			dev->SetPixelShader(nullptr);
@@ -121,6 +97,11 @@ namespace components
 			dev->SetRenderState(D3DRS_LIGHTING,         FALSE);
 			dev->SetRenderState(D3DRS_FOGENABLE,        FALSE);
 			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,  FALSE);
+			dev->SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE);
+			dev->SetRenderState(D3DRS_COLORWRITEENABLE,
+				D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN |
+				D3DCOLORWRITEENABLE_BLUE | D3DCOLORWRITEENABLE_ALPHA);
+			dev->SetRenderState(D3DRS_STENCILENABLE,    FALSE);
 
 			// v13: composite blend mode is selectable.
 			const int blend_mode = dvars::r_mirrorViewmodel_rttBlend
@@ -167,6 +148,7 @@ namespace components
 			dev->SetSamplerState(0, D3DSAMP_ADDRESSU,  D3DTADDRESS_CLAMP);
 			dev->SetSamplerState(0, D3DSAMP_ADDRESSV,  D3DTADDRESS_CLAMP);
 			dev->SetTexture(0, g_tex);
+			dev->SetVertexDeclaration(nullptr);
 			dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
 
 			const float W = (float)g_w;
@@ -180,32 +162,9 @@ namespace components
 			};
 			dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(V));
 
-			dev->SetTexture(0, oldTex);
-			if (oldTex) oldTex->Release();
-			dev->SetFVF(oldFVF);
-			dev->SetVertexShader(oldVS); if (oldVS) oldVS->Release();
-			dev->SetPixelShader(oldPS);  if (oldPS) oldPS->Release();
-			dev->SetRenderState(D3DRS_ZENABLE,          oldZE);
-			dev->SetRenderState(D3DRS_ZWRITEENABLE,     oldZW);
-			dev->SetRenderState(D3DRS_ALPHABLENDENABLE, oldAB);
-			dev->SetRenderState(D3DRS_SRCBLEND,         oldSB);
-			dev->SetRenderState(D3DRS_DESTBLEND,        oldDB);
-			dev->SetRenderState(D3DRS_CULLMODE,         oldCM);
-			dev->SetRenderState(D3DRS_LIGHTING,         oldL);
-			dev->SetRenderState(D3DRS_FOGENABLE,        oldFE);
-			dev->SetRenderState(D3DRS_ALPHATESTENABLE,  oldAT);
-			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,  oldSrgb);
-			dev->SetRenderState(D3DRS_BLENDOP,    oldBlendOp);
-			dev->SetRenderState(D3DRS_ALPHAREF,   oldAlphaRef);
-			dev->SetRenderState(D3DRS_ALPHAFUNC,  oldAlphaFunc);
-			dev->SetTextureStageState(0, D3DTSS_COLOROP,   oldStg0_CO);
-			dev->SetTextureStageState(0, D3DTSS_COLORARG1, oldStg0_CA1);
-			dev->SetTextureStageState(0, D3DTSS_ALPHAOP,   oldStg0_AO);
-			dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, oldStg0_AA1);
-			dev->SetSamplerState(0, D3DSAMP_MINFILTER, oldSamp0_min);
-			dev->SetSamplerState(0, D3DSAMP_MAGFILTER, oldSamp0_mag);
-			dev->SetSamplerState(0, D3DSAMP_ADDRESSU,  oldSamp0_addrU);
-			dev->SetSamplerState(0, D3DSAMP_ADDRESSV,  oldSamp0_addrV);
+			// Restore everything captured in the state block (incl. stream source 0,
+			// index buffer, vertex decl, shaders, all render states, samplers).
+			if (sb) { sb->Apply(); sb->Release(); }
 		}
 
 		static void on_device_reset()
