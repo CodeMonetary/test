@@ -1588,18 +1588,36 @@ namespace components
 			// also flow through this function and must NOT be mirrored.
 			if (pose != static_cast<void*>(&game::cgs->viewModelPose)) return result;
 
-			const float* vorg  = game::cgs->refdef.vieworg;
-			const float* right = game::cgs->refdef.viewaxis[1];
+			const float* vorg = game::cgs->refdef.vieworg;
+			const float (*va)[3] = game::cgs->refdef.viewaxis;
+
+			// v30: choose which view-axis row defines the mirror plane
+			// normal. iw3xo's angles_to_axis() produces axis[0]=forward,
+			// axis[1]=-right (= left), axis[2]=up. For a screen-space
+			// horizontal flip (which is what r_mirrorViewmodel_rtt does
+			// via UV-flip composition) the correct mirror plane normal is
+			// the camera right axis. Reflection across plane(p, n) gives
+			// the same result for n and -n, so axis[1] (left) and -axis[1]
+			// (right) are equivalent. But to A/B against axis[0] / axis[2]
+			// in case viewaxis convention differs at runtime, expose this
+			// via r_mirrorViewmodel_mirrorFxAxisIdx (default 1).
+			const int axis_idx_raw = (dvars::r_mirrorViewmodel_mirrorFxAxisIdx
+				? dvars::r_mirrorViewmodel_mirrorFxAxisIdx->current.integer : 1);
+			const int axis_idx = (axis_idx_raw < 0 || axis_idx_raw > 2) ? 1 : axis_idx_raw;
+			const float* mirror_n = va[axis_idx];
+
+			float orig_in[3] = { 0.0f, 0.0f, 0.0f };
+			if (origin) { orig_in[0] = origin[0]; orig_in[1] = origin[1]; orig_in[2] = origin[2]; }
 
 			if (origin)
 			{
 				const float dx = origin[0] - vorg[0];
 				const float dy = origin[1] - vorg[1];
 				const float dz = origin[2] - vorg[2];
-				const float dot = dx * right[0] + dy * right[1] + dz * right[2];
-				origin[0] -= 2.0f * dot * right[0];
-				origin[1] -= 2.0f * dot * right[1];
-				origin[2] -= 2.0f * dot * right[2];
+				const float dot = dx * mirror_n[0] + dy * mirror_n[1] + dz * mirror_n[2];
+				origin[0] -= 2.0f * dot * mirror_n[0];
+				origin[1] -= 2.0f * dot * mirror_n[1];
+				origin[2] -= 2.0f * dot * mirror_n[2];
 			}
 
 			// Reflecting the 3x3 axis produces a left-handed (det = -1)
@@ -1617,21 +1635,50 @@ namespace components
 				for (int r = 0; r < 3; ++r)
 				{
 					float* row = axis + r * 3;
-					const float dot = row[0] * right[0] + row[1] * right[1] + row[2] * right[2];
-					row[0] -= 2.0f * dot * right[0];
-					row[1] -= 2.0f * dot * right[1];
-					row[2] -= 2.0f * dot * right[2];
+					const float dot = row[0] * mirror_n[0] + row[1] * mirror_n[1] + row[2] * mirror_n[2];
+					row[0] -= 2.0f * dot * mirror_n[0];
+					row[1] -= 2.0f * dot * mirror_n[1];
+					row[2] -= 2.0f * dot * mirror_n[2];
 				}
 			}
 
+			// v30: extended logging - dump full geometric state so we can
+			// diagnose camera-rotation drift offline. One log line covers:
+			//   - bone_index (which tag was queried)
+			//   - vorg (camera origin)
+			//   - axis[0..2] (camera forward/left/up per iw3xo convention)
+			//   - origin BEFORE reflection (raw tag world pos from engine)
+			//   - origin AFTER reflection (what we hand back to cgame)
+			//   - the view-space (forward, side, up) decomposition of the
+			//     camera->tag offset, to see which axes the tag really lives
+			//     on relative to the camera at this instant.
 			const int log_left = (dvars::r_mirrorViewmodel_mirrorFxLog
 				? dvars::r_mirrorViewmodel_mirrorFxLog->current.integer : 0);
 			if (log_left > 0 && dvars::r_mirrorViewmodel_mirrorFxLog && origin)
 			{
 				dvars::r_mirrorViewmodel_mirrorFxLog->current.integer = log_left - 1;
+
+				const float ox = orig_in[0] - vorg[0];
+				const float oy = orig_in[1] - vorg[1];
+				const float oz = orig_in[2] - vorg[2];
+				const float vs0 = ox * va[0][0] + oy * va[0][1] + oz * va[0][2];
+				const float vs1 = ox * va[1][0] + oy * va[1][1] + oz * va[1][2];
+				const float vs2 = ox * va[2][0] + oy * va[2][1] + oz * va[2][2];
+
 				game::Com_PrintMessage(0, utils::va(
-					"[tag_mirror] viewmodel tag reflected: origin=(%.1f %.1f %.1f)\n",
-					origin[0], origin[1], origin[2]), 0);
+					"[tag_mirror] bone=%d  vorg=(%.1f %.1f %.1f)  "
+					"axis[0]=(%.3f %.3f %.3f)  axis[1]=(%.3f %.3f %.3f)  axis[2]=(%.3f %.3f %.3f)  "
+					"orig=(%.1f %.1f %.1f)  refl=(%.1f %.1f %.1f)  "
+					"vs(a0,a1,a2)=(%.2f %.2f %.2f)  axis_idx=%d\n",
+					bone_index,
+					vorg[0], vorg[1], vorg[2],
+					va[0][0], va[0][1], va[0][2],
+					va[1][0], va[1][1], va[1][2],
+					va[2][0], va[2][1], va[2][2],
+					orig_in[0], orig_in[1], orig_in[2],
+					origin[0], origin[1], origin[2],
+					vs0, vs1, vs2,
+					axis_idx), 0);
 			}
 
 			return result;
@@ -1936,6 +1983,14 @@ namespace components
 			/* default	*/ 0,
 			/* minVal	*/ 0,
 			/* maxVal	*/ 1,
+			/* flags	*/ game::dvar_flags::saved);
+
+		dvars::r_mirrorViewmodel_mirrorFxAxisIdx = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_mirrorFxAxisIdx",
+			/* desc		*/ "v30: which row of cgs->refdef.viewaxis defines the mirror plane normal for FX reflection. iw3xo's angles_to_axis() produces axis[0]=forward, axis[1]=-right (= left), axis[2]=up; the reflection plane normal should be the camera right axis (or left, since reflection is the same for n and -n). Use 1 (default) for left/right axis. Use 0 only to A/B if the in-engine viewaxis convention turns out to differ. Use 2 for vertical mirror (head/feet, almost certainly never wanted).",
+			/* default	*/ 1,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 2,
 			/* flags	*/ game::dvar_flags::saved);
 
 		// Install the FX mirror detour. Safe even when r_mirrorViewmodel_mirrorFx
