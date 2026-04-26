@@ -1,0 +1,19 @@
+; cod4mirror — proxy d3d9.dll exports.
+; Required because __stdcall on x86 mangles names ("_Direct3DCreate9@4");
+; this .def forces clean export names matching the real d3d9.dll so iw3mp.exe
+; can resolve them.
+LIBRARY "d3d9"
+EXPORTS
+	Direct3DCreate9
+	Direct3DCreate9Ex
+	Direct3DShaderValidatorCreate9
+	D3DPERF_BeginEvent
+	D3DPERF_EndEvent
+	D3DPERF_GetStatus
+	D3DPERF_QueryRepeatFrame
+	D3DPERF_SetMarker
+	D3DPERF_SetOptions
+	D3DPERF_SetRegion
+	DebugSetLevel
+	DebugSetMute
+	Direct3D9EnableMaximizedWindowedModeShim

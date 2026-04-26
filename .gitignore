@@ -1,0 +1,26 @@
+# build output
+build/
+bin/
+obj/
+*.sln.DotSettings.user
+*.vcxproj.user
+*.suo
+*.user
+.vs/
+
+# binaries
+*.dll
+*.exe
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.obj
+*.idb
+*.tlog
+
+# editor
+.idea/
+.vscode/
+*.swp
+*.swo
