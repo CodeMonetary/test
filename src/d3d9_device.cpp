@@ -1,8 +1,8 @@
-// cod4mirror — IDirect3DDevice9 passthrough wrapper.
-// Phase 1: every method delegates to the original device. Future
-// phases will hook specific methods (Present/EndScene/SetPixelShaderConstantF/...)
-// with mirror logic on top.
+// cod4mirror — IDirect3DDevice9 wrapper. Most methods passthrough; a few
+// hot ones (Present/EndScene/SetVertex|PixelShaderConstantF/Draw*) call into
+// the mirror module.
 #include "d3d9_device.h"
+#include "mirror.h"
 
 namespace cod4mirror
 {
@@ -73,6 +73,7 @@ namespace cod4mirror
 
 	HRESULT __stdcall D3D9Device::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion)
 	{
+		mirror::on_present(m_orig);
 		return m_orig->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
 	}
 
@@ -198,6 +199,7 @@ namespace cod4mirror
 
 	HRESULT __stdcall D3D9Device::EndScene()
 	{
+		mirror::on_end_scene(m_orig);
 		return m_orig->EndScene();
 	}
 
@@ -393,12 +395,16 @@ namespace cod4mirror
 
 	HRESULT __stdcall D3D9Device::DrawPrimitive(D3DPRIMITIVETYPE PrimitiveType, UINT StartVertex, UINT PrimitiveCount)
 	{
-		return m_orig->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
+		const HRESULT hr = m_orig->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
+		mirror::on_after_draw(m_orig);
+		return hr;
 	}
 
 	HRESULT __stdcall D3D9Device::DrawIndexedPrimitive(D3DPRIMITIVETYPE PrimitiveType, INT BaseVertexIndex, UINT MinVertexIndex, UINT NumVertices, UINT startIndex, UINT primCount)
 	{
-		return m_orig->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
+		const HRESULT hr = m_orig->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
+		mirror::on_after_draw(m_orig);
+		return hr;
 	}
 
 	HRESULT __stdcall D3D9Device::DrawPrimitiveUP(D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount, CONST void* pVertexStreamZeroData, UINT VertexStreamZeroStride)
@@ -458,6 +464,7 @@ namespace cod4mirror
 
 	HRESULT __stdcall D3D9Device::SetVertexShaderConstantF(UINT StartRegister, CONST float* pConstantData, UINT Vector4fCount)
 	{
+		mirror::on_set_vertex_shader_constant_f(m_orig, StartRegister, pConstantData, Vector4fCount);
 		return m_orig->SetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount);
 	}
 
@@ -533,6 +540,7 @@ namespace cod4mirror
 
 	HRESULT __stdcall D3D9Device::SetPixelShaderConstantF(UINT StartRegister, CONST float* pConstantData, UINT Vector4fCount)
 	{
+		mirror::on_set_pixel_shader_constant_f(m_orig, StartRegister, pConstantData, Vector4fCount);
 		return m_orig->SetPixelShaderConstantF(StartRegister, pConstantData, Vector4fCount);
 	}
 
