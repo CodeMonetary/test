@@ -136,10 +136,12 @@ namespace cod4mirror::mirror
 				"hit; set to a positive int to dump a one-shot trace.", 0, 0, 1024);
 			d_depth_fix        = Dvar_RegisterInt("r_mirrorViewmodel_depthFix",
 				"cod4mirror: rewrite main depth at gun pixels for post-process AO "
-				"(e.g. ReShade MXAO). 0=off, 1=both passes (default: clear right "
-				"ghost + stamp left near), 2=pass 2 only (left near, skip right), "
-				"3=both with z=0.9999 instead of 1.0 (in case driver clips far).",
-				1, 0, 3);
+				"(e.g. ReShade MXAO). 0=off; 1=both passes (z=1.0 right-far + "
+				"z=0.0 left-near) — leaves a depth discontinuity that MXAO turns "
+				"into a silhouette; 2=pass 2 only (default, left-near stamp only, "
+				"keeps right-side gun depth so MXAO sees a continuous occluder); "
+				"3=both passes with z=0.9999.",
+				2, 0, 3);
 
 			log::line("[register] dvar handles: rtt=%p tonemap=%p early=%p "
 				"srgb=%p blend=%p full=%p fx=%p fxAxis=%p fxDist=%p",
