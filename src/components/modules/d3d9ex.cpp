@@ -1313,6 +1313,33 @@ namespace components
 			}
 		}
 
+		// v34: r_hudMirror = HUD-only horizontal mirror. Detects the engine
+		// 2D-ortho HUD upload by its signature c2[3]==1.0 (per the comment
+		// at the rtt segment-end check above) and negates row 0 of the math
+		// matrix in column-major D3D9 storage = pConstantData[0,4,8,12].
+		// This mirrors clip.x output for any draw using this projection so
+		// HUD geometry renders horizontally flipped. Other 2D-ortho passes
+		// (post-FX, stencil-shadow setup) use a different c2[3] value and
+		// are NOT touched. Designed to combine with ReShade's Flip.fx, which
+		// flips the entire final frame: with r_hudMirror=1 the HUD is
+		// pre-mirrored at engine level, then Flip.fx mirrors the whole
+		// frame, so HUD reads upright while world+gun stay mirrored. World
+		// and viewmodel cull stays unchanged because we only flip the HUD
+		// projection, not the world/gun projections.
+		const int hud_mirror = dvars::r_hudMirror
+			? dvars::r_hudMirror->current.integer : 0;
+		const bool is_hud_ortho = is_mtx_at_zero && (c23 > 0.5f && c23 < 1.5f);
+		float local_mtx_hud[16];
+		if (hud_mirror == 1 && is_hud_ortho)
+		{
+			for (int i = 0; i < 16; ++i) local_mtx_hud[i] = out_data[i];
+			local_mtx_hud[0]  = -local_mtx_hud[0];
+			local_mtx_hud[4]  = -local_mtx_hud[4];
+			local_mtx_hud[8]  = -local_mtx_hud[8];
+			local_mtx_hud[12] = -local_mtx_hud[12];
+			out_data = local_mtx_hud;
+		}
+
 		// Apply flip if: this upload is a 4-row matrix at the configured flipReg AND we are in
 		// a gun pass (dhp itself, or within follow window when flipVSCF==2).
 		// When rtt is on, the off-screen render path replaces matrix-flip; disable it.

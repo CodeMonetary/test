@@ -2071,6 +2071,24 @@ namespace components
 			/* maxVal	*/ 1,
 			/* flags	*/ game::dvar_flags::saved);
 
+		// v34: r_hudMirror = HUD-only horizontal mirror via 2D-ortho VSCF
+		// flip. Use case: combine with ReShade's Flip.fx (which mirrors the
+		// entire final back-buffer including HUD). With Flip.fx alone the HUD
+		// reads in mirror-image (numbers/text reversed). Enabling r_hudMirror
+		// pre-mirrors the HUD at the engine 2D-ortho upload; Flip.fx then
+		// flips it back so HUD is upright while world+gun stay mirrored. Note
+		// detection is by c2[3]==1.0 (the 2D-ortho HUD signature noted in
+		// d3d9ex::SetVertexShaderConstantF). Other 2D-ortho passes (post-FX,
+		// stencil-shadow setup) use different c2[3] values and are NOT
+		// touched. Compatible with r_fullMirror 0/1/2 and Flip.fx.
+		dvars::r_hudMirror = game::Dvar_RegisterInt(
+			/* name		*/ "r_hudMirror",
+			/* desc		*/ "v34: horizontal mirror of the HUD only (does not touch world/gun/post-FX). Detects HUD by the 2D-ortho c2[3]==1.0 VSCF signature and negates row 0 of the projection matrix. Designed to combine with ReShade's Flip.fx for a montage where Flip.fx mirrors the entire frame and r_hudMirror=1 pre-mirrors HUD so the final HUD reads upright while world+gun are mirrored. 0 = off. 1 = mirror HUD.",
+			/* default	*/ 0,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 1,
+			/* flags	*/ game::dvar_flags::saved);
+
 		// Install the FX mirror detour. Safe even when r_mirrorViewmodel_mirrorFx
 		// is 0 because the pre-hook bails immediately in that case.
 		fx_mirror::install();
