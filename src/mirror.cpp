@@ -113,8 +113,8 @@ namespace cod4mirror::mirror
 			d_composite_srgb   = Dvar_RegisterInt("r_mirrorViewmodel_compositeSrgb",
 				"cod4mirror: 0=raw, 1=sRGB write (default), 2=sRGB read, 3=both.", 1, 0, 3);
 			d_rtt_blend        = Dvar_RegisterInt("r_mirrorViewmodel_rttBlend",
-				"cod4mirror: blend mode. 0=alpha, 1=alpha+test, 2=add (default), 3=add+test.",
-				2, 0, 3);
+				"cod4mirror: blend mode. 0=alpha (default), 1=alpha+test, 2=add, 3=add+test.",
+				0, 0, 3);
 			d_full_mirror      = Dvar_RegisterInt("r_fullMirror",
 				"cod4mirror: 0=off, 1=mirror world+gun before HUD, 2=mirror everything.",
 				0, 0, 2);
@@ -549,14 +549,18 @@ namespace cod4mirror::mirror
 		{
 			g_vscf_dhp_hits++;
 			if (!g_pass_active && !g_in_segment)
-				log::line("[vscf] DHP gun pass START c23=%.6f", c23);
+			{
+				static unsigned s = 0;
+				if (s++ < 8) log::line("[vscf] DHP gun pass START c23=%.6f", c23);
+			}
 			begin_segment(dev);
 		}
 		else if (g_in_segment)
 		{
 			// any non-dhp 4-row matrix while a gun segment is bound = transition
 			// out of viewmodel pass (world / 2D HUD setup). Restore engine RT.
-			log::line("[vscf] gun pass END (c23=%.6f exits dhp)", c23);
+			static unsigned s = 0;
+			if (s++ < 8) log::line("[vscf] gun pass END (c23=%.6f exits dhp)", c23);
 			end_segment(dev);
 		}
 	}
@@ -600,7 +604,7 @@ namespace cod4mirror::mirror
 		{
 			if (tonemap)
 			{
-				log::line("[pscf] -> inject_into_tonemap_source");
+				{ static unsigned s = 0; if (s++ < 4) log::line("[pscf] -> inject_into_tonemap_source"); }
 				if (!inject_into_tonemap_source(dev))
 				{
 					log::line("[pscf] inject FAILED, falling back to early composite");
@@ -625,7 +629,7 @@ namespace cod4mirror::mirror
 			g_pending_early_composite = false;
 			if (g_pass_active || g_in_segment)
 			{
-				log::line("[after_draw] pending early composite -> final_composite");
+				{ static unsigned s = 0; if (s++ < 4) log::line("[after_draw] pending early composite -> final_composite"); }
 				if (g_in_segment) end_segment(dev);
 				final_composite(dev);
 			}
@@ -633,7 +637,7 @@ namespace cod4mirror::mirror
 		if (g_pending_fullmirror_flip)
 		{
 			g_pending_fullmirror_flip = false;
-			log::line("[after_draw] pending fullmirror flip -> do_fullscreen_flip");
+			{ static unsigned s = 0; if (s++ < 4) log::line("[after_draw] pending fullmirror flip -> do_fullscreen_flip"); }
 			do_fullscreen_flip(dev);
 		}
 	}
@@ -683,8 +687,10 @@ namespace cod4mirror::mirror
 		// is at least visible (even if it covers the HUD).
 		if (g_pass_active || g_in_segment)
 		{
-			log::line("[end_scene] safety-net final_composite (pass_active=%d in_seg=%d)",
-				(int)g_pass_active, (int)g_in_segment);
+			static unsigned s = 0;
+			if (s++ < 4)
+				log::line("[end_scene] safety-net final_composite (pass_active=%d in_seg=%d)",
+					(int)g_pass_active, (int)g_in_segment);
 			final_composite(dev);
 		}
 		// r_fullMirror == 2: brute-force flip everything (incl. HUD).

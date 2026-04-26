@@ -56,7 +56,11 @@ namespace cod4mirror::log
 			if (g_file == INVALID_HANDLE_VALUE) return;
 			DWORD wrote = 0;
 			WriteFile(g_file, msg, (DWORD)len, &wrote, nullptr);
-			FlushFileBuffers(g_file);
+			// NOTE: no FlushFileBuffers — that forced a synchronous disk
+			// sync on every line and tanked FPS on hot-path logs (~5 lines
+			// per frame at 60 fps -> 300 syncs/sec). The OS still flushes
+			// on close / app exit, and the kernel page cache survives
+			// even on hard crashes for any line that already returned.
 		}
 	}
 
