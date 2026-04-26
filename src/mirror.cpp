@@ -228,24 +228,61 @@ namespace cod4mirror::mirror
 			if (FAILED(dev->CreateDepthStencilSurface(bd.Width, bd.Height, D3DFMT_D24S8,
 				D3DMULTISAMPLE_NONE, 0, TRUE, &g_depth, nullptr))) { release_targets(); return false; }
 
-			// Backup depth surface — same format as main, used to snapshot
-			// the world-only depth before the gun pass writes anything to
-			// it, then restore at PSCF tonemap time so MXAO never sees the
-			// invisible gun's leaked depth on the right side. Failure here
-			// is non-fatal; we just disable the snapshot path.
-			if (FAILED(dev->CreateDepthStencilSurface(bd.Width, bd.Height, D3DFMT_D24S8,
-				D3DMULTISAMPLE_NONE, 0, TRUE, &g_depth_backup, nullptr)))
-			{
-				log::line("[depth_backup] CreateDepthStencilSurface failed; "
-					"snapshot/restore disabled, ghost-on-floor MXAO artifact "
-					"will stay.");
-				g_depth_backup            = nullptr;
-				g_depth_backup_unsupported = true;
-			}
+			// NOTE: g_depth_backup is created lazily in begin_segment,
+			// AFTER we know the engine's main depth surface description
+			// (format, multisample type, multisample quality). Creating
+			// it here from the back-buffer desc was producing surfaces
+			// that didn't match the engine's depth and StretchRect failed
+			// with D3DERR_INVALIDCALL.
 
 			g_w = (int)bd.Width;
 			g_h = (int)bd.Height;
 			return true;
+		}
+
+		// Create the depth backup surface to EXACTLY match the description
+		// of the engine's currently-bound main depth-stencil. StretchRect
+		// between depth surfaces requires identical format AND multisample
+		// AND multisample-quality on most drivers — guessing wrong fails
+		// with D3DERR_INVALIDCALL.
+		void ensure_depth_backup(IDirect3DDevice9* dev, IDirect3DSurface9* main_dsv)
+		{
+			if (g_depth_backup_unsupported || !main_dsv) return;
+			D3DSURFACE_DESC d{};
+			if (FAILED(main_dsv->GetDesc(&d))) return;
+			if (g_depth_backup)
+			{
+				D3DSURFACE_DESC b{};
+				if (SUCCEEDED(g_depth_backup->GetDesc(&b))
+					&& b.Format == d.Format
+					&& b.Width == d.Width
+					&& b.Height == d.Height
+					&& b.MultiSampleType == d.MultiSampleType
+					&& b.MultiSampleQuality == d.MultiSampleQuality)
+				{
+					return; // backup matches, nothing to do
+				}
+				g_depth_backup->Release();
+				g_depth_backup = nullptr;
+			}
+			HRESULT hr = dev->CreateDepthStencilSurface(d.Width, d.Height, d.Format,
+				d.MultiSampleType, d.MultiSampleQuality, TRUE, &g_depth_backup, nullptr);
+			if (FAILED(hr))
+			{
+				log::line("[depth_backup] CreateDepthStencilSurface failed for "
+					"engine spec (fmt=%u w=%u h=%u msaa=%u qual=%u hr=0x%08X); "
+					"snapshot disabled.",
+					(unsigned)d.Format, (unsigned)d.Width, (unsigned)d.Height,
+					(unsigned)d.MultiSampleType, (unsigned)d.MultiSampleQuality,
+					(unsigned)hr);
+				g_depth_backup            = nullptr;
+				g_depth_backup_unsupported = true;
+				return;
+			}
+			log::line("[depth_backup] backup created to match engine: "
+				"fmt=%u w=%u h=%u msaa=%u qual=%u",
+				(unsigned)d.Format, (unsigned)d.Width, (unsigned)d.Height,
+				(unsigned)d.MultiSampleType, (unsigned)d.MultiSampleQuality);
 		}
 
 		void begin_segment(IDirect3DDevice9* dev)
@@ -262,27 +299,31 @@ namespace cod4mirror::mirror
 			// did not exist". We restore from this in apply_main_depth_fix
 			// so the right-side gun-shape AO ghost (caused by leaked gun
 			// depth that escaped our redirect) is wiped out.
-			if (!g_pass_active && g_saved_depth && g_depth_backup
-				&& !g_depth_backup_unsupported)
+			if (!g_pass_active && g_saved_depth)
 			{
-				HRESULT hr = dev->StretchRect(g_saved_depth, nullptr,
-					g_depth_backup, nullptr, D3DTEXF_NONE);
-				if (SUCCEEDED(hr))
+				ensure_depth_backup(dev, g_saved_depth);
+				if (g_depth_backup && !g_depth_backup_unsupported)
 				{
-					g_have_depth_snapshot = true;
-				}
-				else
-				{
-					static bool s_logged = false;
-					if (!s_logged)
+					HRESULT hr = dev->StretchRect(g_saved_depth, nullptr,
+						g_depth_backup, nullptr, D3DTEXF_NONE);
+					if (SUCCEEDED(hr))
 					{
-						s_logged = true;
-						log::line("[depth_backup] StretchRect main->backup failed "
-							"(hr=0x%08X); snapshot disabled for this device.",
-							(unsigned)hr);
+						g_have_depth_snapshot = true;
 					}
-					g_depth_backup_unsupported = true;
-					g_have_depth_snapshot      = false;
+					else
+					{
+						static bool s_logged = false;
+						if (!s_logged)
+						{
+							s_logged = true;
+							log::line("[depth_backup] StretchRect main->backup failed "
+								"even with matching desc (hr=0x%08X); driver "
+								"refuses depth-StretchRect, snapshot disabled.",
+								(unsigned)hr);
+						}
+						g_depth_backup_unsupported = true;
+						g_have_depth_snapshot      = false;
+					}
 				}
 			}
 
