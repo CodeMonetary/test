@@ -25,6 +25,7 @@
 // which avoids the lighting/cull artifacts the legacy matrix-flip path had.
 #include "mirror.h"
 #include "engine.h"
+#include "fx_mirror.h"
 #include "logger.h"
 #include <cstdio>
 
@@ -42,6 +43,8 @@ namespace cod4mirror::mirror
 		engine::dvar_s* d_mirror_fx           = nullptr;
 		engine::dvar_s* d_mirror_fx_axis      = nullptr;
 		engine::dvar_s* d_mirror_fx_dist      = nullptr;
+		engine::dvar_s* d_mirror_fx_axis_idx  = nullptr;
+		engine::dvar_s* d_mirror_fx_log       = nullptr;
 
 		bool g_init_done = false;
 
@@ -124,6 +127,12 @@ namespace cod4mirror::mirror
 				"cod4mirror: FX axis mode. 0=origin, 1=full-reflect, 2=RH-mirror.", 2, 0, 2);
 			d_mirror_fx_dist   = Dvar_RegisterFloat("r_mirrorViewmodel_mirrorFxDist",
 				"cod4mirror: FX mirror distance threshold (units).", 64.0f, 0.0f, 4096.0f);
+			d_mirror_fx_axis_idx = Dvar_RegisterInt("r_mirrorViewmodel_mirrorFxAxisIdx",
+				"cod4mirror: which view-axis row defines the FX mirror plane normal. "
+				"0=forward, 1=side (default), 2=up.", 1, 0, 2);
+			d_mirror_fx_log    = Dvar_RegisterInt("r_mirrorViewmodel_mirrorFxLog",
+				"cod4mirror: log up to N tag-mirror reflections. Decrements on each "
+				"hit; set to a positive int to dump a one-shot trace.", 0, 0, 1024);
 
 			log::line("[register] dvar handles: rtt=%p tonemap=%p early=%p "
 				"srgb=%p blend=%p full=%p fx=%p fxAxis=%p fxDist=%p",
@@ -142,8 +151,47 @@ namespace cod4mirror::mirror
 					"Address 0x%08X is wrong for this iw3mp.exe build.",
 					(unsigned)kAddr_Dvar_Register);
 			}
-		}
 
+			// Phase 4: install the CG_DObjGetWorldBoneMatrix inline hook
+			// now that the engine is fully up. The hook is a no-op at
+			// runtime while r_mirrorViewmodel_mirrorFx is 0 (default), so
+			// installing it unconditionally has no visible effect for
+			// users who don't opt in.
+			__try { fx_mirror::install(); }
+			__except (EXCEPTION_EXECUTE_HANDLER)
+			{
+				log::line("[fx_mirror] !!! SEH during install — hook NOT active.");
+			}
+		}
+	}
+
+	// dvar accessors exposed to fx_mirror.cpp (extern "C" linkage so the
+	// translation unit doesn't need to know about the cod4mirror::mirror
+	// namespace, and so the names match what fx_mirror.cpp forward-declares).
+	extern "C" int   fx_mirror_enabled()    { return engine::read_dvar_int(d_mirror_fx); }
+	extern "C" int   fx_mirror_axis_mode()  { return engine::read_dvar_int(d_mirror_fx_axis); }
+	extern "C" float fx_mirror_dist()       { return d_mirror_fx_dist ? engine::read_dvar_float(d_mirror_fx_dist) : 64.0f; }
+	extern "C" int   fx_mirror_log_left()   { return engine::read_dvar_int(d_mirror_fx_log); }
+	extern "C" int   fx_mirror_axis_idx()   { return engine::read_dvar_int(d_mirror_fx_axis_idx); }
+	extern "C" int   fx_mirror_active()
+	{
+		const int rtt  = engine::read_dvar_int(d_rtt);
+		const int full = engine::read_dvar_int(d_full_mirror);
+		return (rtt || full) ? 1 : 0;
+	}
+	extern "C" void  fx_mirror_log_dec()
+	{
+		if (!d_mirror_fx_log) return;
+		const int v = engine::read_dvar_int(d_mirror_fx_log);
+		if (v > 0)
+		{
+			// dvar struct: current.integer at offset 12 (matches engine layout).
+			*reinterpret_cast<int*>(reinterpret_cast<std::uint8_t*>(d_mirror_fx_log) + 12) = v - 1;
+		}
+	}
+
+	namespace
+	{
 		// ---- RTT off-screen target management -----------------------------
 		void release_targets()
 		{

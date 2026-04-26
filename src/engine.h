@@ -6,8 +6,19 @@
 //   Dvar_Register        = 0x0056C130   __cdecl, unified register fn
 //                          (verified via xref to "Can't create dvar '%s':
 //                          %i dvars already exist" at .rdata 0x6F3EC0)
-//   CG_DObjGetWorldBoneMatrix = 0x00433F00   __cdecl, prologue 8 bytes
+//   CG_DObjGetWorldBoneMatrix = 0x00433F00   __usercall, prologue 8 bytes
 //                                            (83 EC 30 53 8B 5C 24 38)
+//
+//   cgs (cg_s* base)            = 0x0074E338  (137 hits in .text)
+//   cgs->refdef.vieworg         = 0x00797618  (52 hits, float[3])
+//   cgs->refdef.viewaxis        = 0x00797624  (24 hits, float[3][3])
+//   &cgs->viewModelPose         = 0x0084C570  (10 hits, cpose_t)
+//
+// The cgs offsets were derived by compiling iw3xo's structs.hpp via mingw
+// to compute offsetof(cg_s, refdef)=0x492C8, offsetof(cg_s, viewModelPose)
+// =0xFE238, and offsetof(refdef_s, vieworg)=0x18 / viewaxis=0x24, then
+// verifying each absolute address has multiple direct references in the
+// iw3mp.exe .text section (read via pefile).
 //
 // Anything address-sensitive lives here so future versions of iw3mp can
 // be ported by editing this file alone.
@@ -59,6 +70,18 @@ namespace cod4mirror::engine
 	// vanilla iw3mp 1.7 (PE 2008-06-19)
 	inline constexpr std::uintptr_t kAddr_Dvar_Register     = 0x0056C130;
 	inline constexpr std::uintptr_t kAddr_CG_DObjGetWorldBoneMatrix = 0x00433F00;
+
+	// First-person camera state. Used by the FX-mirror tag_replacement to
+	// reflect viewmodel-attached tag positions/axes about the camera right
+	// axis.
+	inline constexpr std::uintptr_t kAddr_cgs_base          = 0x0074E338;
+	inline constexpr std::uintptr_t kAddr_refdef_vieworg    = 0x00797618; // float[3]
+	inline constexpr std::uintptr_t kAddr_refdef_viewaxis   = 0x00797624; // float[3][3]
+	inline constexpr std::uintptr_t kAddr_viewModelPose     = 0x0084C570; // cpose_t
+
+	inline const float* refdef_vieworg()  { return reinterpret_cast<const float*>(kAddr_refdef_vieworg); }
+	inline const float* refdef_viewaxis() { return reinterpret_cast<const float*>(kAddr_refdef_viewaxis); }
+	inline const void*  viewModelPose()   { return reinterpret_cast<const void*>(kAddr_viewModelPose); }
 
 	inline DvarRegisterFn Dvar_RegisterRaw()
 	{
