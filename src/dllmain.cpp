@@ -84,11 +84,18 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*lpReserved*/)
 	case DLL_PROCESS_ATTACH:
 		g_self = hModule;
 		DisableThreadLibraryCalls(hModule);
-		// preload real d3d9 so the first export call has no latency hit.
-		resolve("Direct3DCreate9");
+		// IMPORTANT: do NOT LoadLibrary anything here. Chain DLLs (e.g.
+		// ReShade) run heavy work in their own DllMain — thread creation,
+		// IAT hooking via MinHook, file I/O — and doing that under loader
+		// lock deadlocks or aborts the host process. We instead defer the
+		// real-d3d9 / chain load to the first proxy_* call, which runs
+		// after the loader has fully released its lock and iw3mp.exe has
+		// finished module init.
 		break;
 	case DLL_PROCESS_DETACH:
-		if (g_real_d3d9) { FreeLibrary(g_real_d3d9); g_real_d3d9 = nullptr; }
+		// Skip FreeLibrary too — we may be shutting down with chain DLLs
+		// holding live D3D resources, and unwinding them under detach
+		// loader-lock can crash. Process exit reclaims the modules anyway.
 		break;
 	default: break;
 	}
