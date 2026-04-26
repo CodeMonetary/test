@@ -53,6 +53,7 @@ namespace cod4mirror::mirror
 		IDirect3DTexture9* g_tex          = nullptr;
 		IDirect3DSurface9* g_color        = nullptr;
 		IDirect3DSurface9* g_depth        = nullptr;
+		IDirect3DSurface9* g_depth_backup = nullptr; // snapshot of main depth before gun pass
 		IDirect3DSurface9* g_saved_color  = nullptr;
 		IDirect3DSurface9* g_saved_depth  = nullptr;
 		int  g_w = 0;
@@ -60,6 +61,8 @@ namespace cod4mirror::mirror
 		bool g_pass_active                = false;
 		bool g_in_segment                 = false;
 		bool g_pending_early_composite    = false;
+		bool g_have_depth_snapshot        = false; // valid this frame
+		bool g_depth_backup_unsupported   = false; // sticky disable if StretchRect fails
 
 		IDirect3DTexture9* g_flip_tex     = nullptr;
 		IDirect3DSurface9* g_flip_surf    = nullptr;
@@ -204,10 +207,12 @@ namespace cod4mirror::mirror
 		// ---- RTT off-screen target management -----------------------------
 		void release_targets()
 		{
-			if (g_color) { g_color->Release(); g_color = nullptr; }
-			if (g_depth) { g_depth->Release(); g_depth = nullptr; }
-			if (g_tex)   { g_tex->Release();   g_tex   = nullptr; }
+			if (g_color)        { g_color->Release();        g_color        = nullptr; }
+			if (g_depth)        { g_depth->Release();        g_depth        = nullptr; }
+			if (g_depth_backup) { g_depth_backup->Release(); g_depth_backup = nullptr; }
+			if (g_tex)          { g_tex->Release();          g_tex          = nullptr; }
 			g_w = g_h = 0;
+			g_have_depth_snapshot = false;
 		}
 
 		bool ensure_targets(IDirect3DDevice9* dev)
@@ -222,6 +227,22 @@ namespace cod4mirror::mirror
 			if (FAILED(g_tex->GetSurfaceLevel(0, &g_color))) { release_targets(); return false; }
 			if (FAILED(dev->CreateDepthStencilSurface(bd.Width, bd.Height, D3DFMT_D24S8,
 				D3DMULTISAMPLE_NONE, 0, TRUE, &g_depth, nullptr))) { release_targets(); return false; }
+
+			// Backup depth surface — same format as main, used to snapshot
+			// the world-only depth before the gun pass writes anything to
+			// it, then restore at PSCF tonemap time so MXAO never sees the
+			// invisible gun's leaked depth on the right side. Failure here
+			// is non-fatal; we just disable the snapshot path.
+			if (FAILED(dev->CreateDepthStencilSurface(bd.Width, bd.Height, D3DFMT_D24S8,
+				D3DMULTISAMPLE_NONE, 0, TRUE, &g_depth_backup, nullptr)))
+			{
+				log::line("[depth_backup] CreateDepthStencilSurface failed; "
+					"snapshot/restore disabled, ghost-on-floor MXAO artifact "
+					"will stay.");
+				g_depth_backup            = nullptr;
+				g_depth_backup_unsupported = true;
+			}
+
 			g_w = (int)bd.Width;
 			g_h = (int)bd.Height;
 			return true;
@@ -233,6 +254,38 @@ namespace cod4mirror::mirror
 			if (!ensure_targets(dev)) return;
 			if (FAILED(dev->GetRenderTarget(0, &g_saved_color))) { g_saved_color = nullptr; return; }
 			if (FAILED(dev->GetDepthStencilSurface(&g_saved_depth))) { g_saved_depth = nullptr; }
+
+			// On the FIRST gun segment of the frame, snapshot the engine's
+			// main depth-stencil into our backup surface. At this point the
+			// engine has rendered the world but not yet the viewmodel, so
+			// the snapshot represents "depth at every pixel as if the gun
+			// did not exist". We restore from this in apply_main_depth_fix
+			// so the right-side gun-shape AO ghost (caused by leaked gun
+			// depth that escaped our redirect) is wiped out.
+			if (!g_pass_active && g_saved_depth && g_depth_backup
+				&& !g_depth_backup_unsupported)
+			{
+				HRESULT hr = dev->StretchRect(g_saved_depth, nullptr,
+					g_depth_backup, nullptr, D3DTEXF_NONE);
+				if (SUCCEEDED(hr))
+				{
+					g_have_depth_snapshot = true;
+				}
+				else
+				{
+					static bool s_logged = false;
+					if (!s_logged)
+					{
+						s_logged = true;
+						log::line("[depth_backup] StretchRect main->backup failed "
+							"(hr=0x%08X); snapshot disabled for this device.",
+							(unsigned)hr);
+					}
+					g_depth_backup_unsupported = true;
+					g_have_depth_snapshot      = false;
+				}
+			}
+
 			dev->SetRenderTarget(0, g_color);
 			dev->SetDepthStencilSurface(g_depth);
 			if (!g_pass_active)
@@ -283,6 +336,37 @@ namespace cod4mirror::mirror
 			const float far_z  = (mode == 3) ? 0.9999f : 1.0f;
 			const bool  do_p1  = (mode == 1 || mode == 3);
 			const bool  do_p2  = (mode == 1 || mode == 2 || mode == 3);
+
+			// Step 0: full restore. If we snapshotted the main depth-stencil
+			// at begin_segment (before any gun draw), copy it back now —
+			// this wipes any gun depth that leaked into the main DSV via
+			// engine paths our redirect didn't catch (the cause of the
+			// MXAO right-side gun ghost on the floor). If snapshot path is
+			// unsupported on this driver, this is a no-op and pass 1 / 2
+			// are the only mitigation.
+			if (g_have_depth_snapshot && g_depth_backup)
+			{
+				IDirect3DSurface9* main_depth = nullptr;
+				if (SUCCEEDED(dev->GetDepthStencilSurface(&main_depth)) && main_depth)
+				{
+					HRESULT hr = dev->StretchRect(g_depth_backup, nullptr,
+						main_depth, nullptr, D3DTEXF_NONE);
+					if (FAILED(hr))
+					{
+						static bool s_logged = false;
+						if (!s_logged)
+						{
+							s_logged = true;
+							log::line("[depth_backup] StretchRect backup->main "
+								"failed (hr=0x%08X); restore disabled.",
+								(unsigned)hr);
+						}
+						g_depth_backup_unsupported = true;
+					}
+					main_depth->Release();
+				}
+				g_have_depth_snapshot = false;
+			}
 
 			IDirect3DStateBlock9* sb = nullptr;
 			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
@@ -879,5 +963,10 @@ namespace cod4mirror::mirror
 		g_in_segment              = false;
 		g_pending_early_composite = false;
 		g_pending_fullmirror_flip = false;
+		// If a snapshot was taken this frame but no PSCF tonemap match
+		// fired (e.g. tonemap path disabled, or the gun pass produced no
+		// pixels), drop it so the next frame's begin_segment does a fresh
+		// snapshot of an up-to-date world depth.
+		g_have_depth_snapshot     = false;
 	}
 }
