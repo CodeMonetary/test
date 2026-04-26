@@ -6,6 +6,7 @@
 namespace components
 {
 	volatile bool _renderer::mirror_viewmodel_active = false;
+	volatile bool _renderer::mirror_world_active    = false;
 	volatile int  _renderer::mirror_vscf_follow_remaining = 0;
 	volatile int  _renderer::mirror_dump_frames_remaining = 0;
 	int           _renderer::mirror_dump_frame_counter   = 0;
@@ -1312,6 +1313,37 @@ namespace components
 		default: break;
 		}
 
+		// v34: r_fullMirror==3 = true-mirror via projection flip applied
+		// to the WORLD scene only (non-viewmodel). When viewmodel scene
+		// (is_viewmodel_dhnc=true), the existing rtt / method handles its
+		// own mirror so we skip - that keeps r_mirrorViewmodel_rtt=1
+		// orthogonal to r_fullMirror=3. Flipping projection during render
+		// makes the engine write a naturally-mirrored INTZ depth buffer,
+		// which is what ReShade's MXAO/SSAO reads - so post-FX coheres
+		// with the mirrored color, no MXAO ghost layer.
+		//
+		// Triangle winding inverts because of the X flip; CULLMODE swap
+		// is handled by D3D9Device::SetRenderState gated on
+		// _renderer::mirror_world_active.
+		const int full_mirror_mode = dvars::r_fullMirror
+			? dvars::r_fullMirror->current.integer : 0;
+		if (full_mirror_mode == 3 && !is_viewmodel_dhnc)
+		{
+			view_parms->projectionMatrix.m[0][0] = -view_parms->projectionMatrix.m[0][0];
+			view_parms->projectionMatrix.m[1][0] = -view_parms->projectionMatrix.m[1][0];
+			view_parms->projectionMatrix.m[2][0] = -view_parms->projectionMatrix.m[2][0];
+			view_parms->projectionMatrix.m[3][0] = -view_parms->projectionMatrix.m[3][0];
+			view_parms->viewProjectionMatrix.m[0][0] = -view_parms->viewProjectionMatrix.m[0][0];
+			view_parms->viewProjectionMatrix.m[1][0] = -view_parms->viewProjectionMatrix.m[1][0];
+			view_parms->viewProjectionMatrix.m[2][0] = -view_parms->viewProjectionMatrix.m[2][0];
+			view_parms->viewProjectionMatrix.m[3][0] = -view_parms->viewProjectionMatrix.m[3][0];
+			_renderer::mirror_world_active = true;
+		}
+		else
+		{
+			_renderer::mirror_world_active = false;
+		}
+
 		if (log_level >= 1 && method != 0 && gate)
 		{
 			game::Com_PrintMessage(0, utils::va(
@@ -2028,10 +2060,10 @@ namespace components
 
 		dvars::r_fullMirror = game::Dvar_RegisterInt(
 			/* name		*/ "r_fullMirror",
-			/* desc		*/ "v32: full-screen mirror for video editing. 0 = off. 1 = mirror world+gun together BEFORE HUD (HUD stays in place); a horizontal flip is applied on the back-buffer right after the engine tonemap pass. With r_mirrorViewmodel_rtt=1 active the mirrored gun (rendered to LEFT) gets flipped a second time so the gun visually appears on the RIGHT while the world is mirrored. 2 = mirror EVERYTHING including HUD (single horizontal flip of the entire final frame at EndScene; the simplest brute-force option).",
+			/* desc		*/ "v34: full-screen mirror. 0 = off. 1 = mirror world+gun BEFORE HUD via back-buffer flip after the engine tonemap pass (HUD stays unmirrored). 2 = mirror EVERYTHING including HUD via single back-buffer flip at EndScene. Modes 1 and 2 are post-render flips so depth-reading post-FX (ReShade MXAO/SSAO) see UNMIRRORED engine depth on top of MIRRORED color, producing a phantom AO ghost layer over the mirrored world. 3 = TRUE mirror via projection-matrix flip (X-negation) applied during render to the world scene only; the engine writes a naturally-mirrored INTZ depth-stencil so depth-reading post-FX cohere with the mirrored color (no MXAO ghost). Mode 3 is orthogonal to r_mirrorViewmodel_rtt: gun continues to mirror via UV-flip at composite. Mode 3 inverts triangle winding so CULLMODE swap is automatically applied while mirror_world_active.",
 			/* default	*/ 0,
 			/* minVal	*/ 0,
-			/* maxVal	*/ 2,
+			/* maxVal	*/ 3,
 			/* flags	*/ game::dvar_flags::saved);
 
 		// v33: ported from cod4mirror — fix MXAO/SSAO bleed-through on the

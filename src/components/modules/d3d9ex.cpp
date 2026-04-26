@@ -665,6 +665,7 @@ namespace components
 		// NOTE: EndScene owns the dump-frame counter. Some IW3 dispatch paths route
 		// Present() around this wrapper, so relying on it alone drops frame boundaries.
 		_renderer::mirror_viewmodel_active = false;
+		_renderer::mirror_world_active    = false;
 		return m_pIDirect3DDevice9->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
 	}
 
@@ -801,6 +802,7 @@ namespace components
 		// r_mirrorViewmodel: belt-and-suspenders; ensure flag is clear at frame start
 		// so the world pass (first after BeginScene) renders with normal culling.
 		_renderer::mirror_viewmodel_active = false;
+		_renderer::mirror_world_active    = false;
 
 		if (_renderer::mirror_dump_active())
 		{
@@ -831,6 +833,7 @@ namespace components
 		// is always called before Present and always reaches our wrapper, so it is a reliable
 		// per-frame hook. Reset the viewmodel flag here too, and advance the dump counter.
 		_renderer::mirror_viewmodel_active = false;
+		_renderer::mirror_world_active    = false;
 
 		if (_renderer::mirror_dump_frames_remaining > 0)
 		{
@@ -983,6 +986,17 @@ namespace components
 				case 3: if (Value != D3DCULL_CW)   { Value = D3DCULL_CW;   swapped = true; } break;
 				case 4: if (Value != D3DCULL_NONE) { Value = D3DCULL_NONE; swapped = true; } break;
 				}
+			}
+
+			// v34: r_fullMirror==3 = world rendered through projection X-flip,
+			// triangle winding is inverted -> swap CULLMODE so front-faces are
+			// drawn. Always apply (no dvar gate) when mirror_world_active.
+			// Exclusive in time with mirror_viewmodel_active (set per-scene by
+			// set_gunfov), so the if/else-if pattern is safe.
+			else if (_renderer::mirror_world_active)
+			{
+				if (Value == D3DCULL_CW)       { Value = D3DCULL_CCW; swapped = true; }
+				else if (Value == D3DCULL_CCW) { Value = D3DCULL_CW;  swapped = true; }
 			}
 
 			if (log_level >= 2)
