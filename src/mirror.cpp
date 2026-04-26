@@ -25,6 +25,7 @@
 // which avoids the lighting/cull artifacts the legacy matrix-flip path had.
 #include "mirror.h"
 #include "engine.h"
+#include "logger.h"
 #include <cstdio>
 
 namespace cod4mirror::mirror
@@ -62,12 +63,21 @@ namespace cod4mirror::mirror
 		int  g_flip_h = 0;
 		bool g_pending_fullmirror_flip    = false;
 
-		void debug_log(const char* msg) { OutputDebugStringA(msg); }
+		// frame counters used to throttle hot-path logging.
+		unsigned g_frame                = 0;
+		unsigned g_vscf_calls           = 0;
+		unsigned g_pscf_calls           = 0;
+		unsigned g_vscf_dhp_hits        = 0;
+		unsigned g_pscf_tonemap_hits    = 0;
+		bool     g_logged_first_present = false;
+		float    g_min_c23 = 1e9f, g_max_c23 = -1e9f;
 
 		// ---- dvar registration -------------------------------------------
 		void register_all()
 		{
 			using namespace engine;
+			log::line("[register] calling Dvar_Register at 0x%08X ...",
+				(unsigned)kAddr_Dvar_Register);
 			d_rtt              = Dvar_RegisterInt("r_mirrorViewmodel_rtt",
 				"cod4mirror: master switch for RTT mirror viewmodel. 0=off, 1=on.", 0, 0, 1);
 			d_tonemap_inject   = Dvar_RegisterInt("r_mirrorViewmodel_rttTonemapInject",
@@ -91,11 +101,23 @@ namespace cod4mirror::mirror
 			d_mirror_fx_dist   = Dvar_RegisterFloat("r_mirrorViewmodel_mirrorFxDist",
 				"cod4mirror: FX mirror distance threshold (units).", 64.0f, 0.0f, 4096.0f);
 
-			char buf[160];
-			std::snprintf(buf, sizeof(buf),
-				"[cod4mirror] dvars registered: rtt=%p fullMirror=%p\n",
-				(void*)d_rtt, (void*)d_full_mirror);
-			debug_log(buf);
+			log::line("[register] dvar handles: rtt=%p tonemap=%p early=%p "
+				"srgb=%p blend=%p full=%p fx=%p fxAxis=%p fxDist=%p",
+				(void*)d_rtt, (void*)d_tonemap_inject, (void*)d_early_composite,
+				(void*)d_composite_srgb, (void*)d_rtt_blend, (void*)d_full_mirror,
+				(void*)d_mirror_fx, (void*)d_mirror_fx_axis, (void*)d_mirror_fx_dist);
+			if (d_rtt)
+			{
+				const int v = engine::read_dvar_int(d_rtt);
+				log::line("[register] read-back r_mirrorViewmodel_rtt = %d "
+					"(should be 0 on first launch)", v);
+			}
+			else
+			{
+				log::line("[register] !!! d_rtt is NULL — registration FAILED. "
+					"Address 0x%08X is wrong for this iw3mp.exe build.",
+					(unsigned)kAddr_Dvar_Register);
+			}
 		}
 
 		// ---- RTT off-screen target management -----------------------------
@@ -468,12 +490,42 @@ namespace cod4mirror::mirror
 		if (!g_init_done)
 		{
 			g_init_done = true;
+			log::reset();
+			log::line("[present] first present — initializing dvars");
 			__try { register_all(); }
 			__except (EXCEPTION_EXECUTE_HANDLER)
 			{
-				debug_log("[cod4mirror] dvar registration crashed (address mismatch?)\n");
+				log::line("[register] !!! SEH exception during Dvar_Register "
+					"call — address 0x%08X is wrong",
+					(unsigned)engine::kAddr_Dvar_Register);
 			}
 		}
+		if (!g_logged_first_present)
+		{
+			g_logged_first_present = true;
+			log::line("[present] hooks live (Present hook fired)");
+		}
+
+		// Once per second, log a heartbeat with frame counters and dvar values
+		// so we can see whether the SetXxxShaderConstantF hooks are firing at
+		// all and whether any signature ever matched. Set period to 60 frames
+		// (~1 sec @ 60 fps).
+		g_frame++;
+		if ((g_frame % 60) == 0)
+		{
+			const int v_rtt    = engine::read_dvar_int(d_rtt);
+			const int v_full   = engine::read_dvar_int(d_full_mirror);
+			const int v_inject = engine::read_dvar_int(d_tonemap_inject);
+			const int v_early  = engine::read_dvar_int(d_early_composite);
+			log::line("[hb] frame=%u vscf_calls=%u dhp_hits=%u pscf_calls=%u "
+				"tonemap_hits=%u rtt=%d full=%d inject=%d early=%d c23=[%.4f..%.4f]",
+				g_frame, g_vscf_calls, g_vscf_dhp_hits, g_pscf_calls,
+				g_pscf_tonemap_hits, v_rtt, v_full, v_inject, v_early,
+				g_min_c23, g_max_c23);
+			g_vscf_calls = g_pscf_calls = g_vscf_dhp_hits = g_pscf_tonemap_hits = 0;
+			g_min_c23 = 1e9f; g_max_c23 = -1e9f;
+		}
+
 		// Frame-boundary safety: any RTT state should already be torn down
 		// at EndScene; if not, drop it so the next frame starts clean.
 		g_pass_active             = false;
@@ -485,20 +537,28 @@ namespace cod4mirror::mirror
 	void on_set_vertex_shader_constant_f(IDirect3DDevice9* dev, UINT start,
 		const float* data, UINT count)
 	{
+		g_vscf_calls++;
 		if (!data || start != 0 || count != 4) return;
+		const float c23 = data[11]; // c2[3]
+		if (c23 < g_min_c23) g_min_c23 = c23;
+		if (c23 > g_max_c23) g_max_c23 = c23;
+
 		const int rtt_on = engine::read_dvar_int(d_rtt);
 		if (!rtt_on) return;
 
-		const float c23 = data[11]; // c2[3]
 		const bool is_dhp = (c23 < -0.02f && c23 > -0.50f);
 		if (is_dhp)
 		{
+			g_vscf_dhp_hits++;
+			if (!g_pass_active && !g_in_segment)
+				log::line("[vscf] DHP gun pass START c23=%.6f", c23);
 			begin_segment(dev);
 		}
 		else if (g_in_segment)
 		{
 			// any non-dhp 4-row matrix while a gun segment is bound = transition
 			// out of viewmodel pass (world / 2D HUD setup). Restore engine RT.
+			log::line("[vscf] gun pass END (c23=%.6f exits dhp)", c23);
 			end_segment(dev);
 		}
 	}
@@ -506,6 +566,7 @@ namespace cod4mirror::mirror
 	void on_set_pixel_shader_constant_f(IDirect3DDevice9* dev, UINT start,
 		const float* data, UINT count)
 	{
+		g_pscf_calls++;
 		if (!data || start != 7 || count < 1) return;
 
 		// PSCF c7 tonemap fingerprint: c70=c71=c72 in [-0.2, 0), c73 in (1, 5).
@@ -515,17 +576,30 @@ namespace cod4mirror::mirror
 			&& c73 > 1.0f && c73 < 5.0f);
 		if (!is_pre_hud) return;
 
+		g_pscf_tonemap_hits++;
 		const int rtt_on    = engine::read_dvar_int(d_rtt);
 		const int early     = engine::read_dvar_int(d_early_composite);
 		const int tonemap   = engine::read_dvar_int(d_tonemap_inject);
 		const int full_mirr = engine::read_dvar_int(d_full_mirror);
 
+		static unsigned s_logged_match = 0;
+		if (s_logged_match < 3)
+		{
+			s_logged_match++;
+			log::line("[pscf] tonemap fingerprint MATCH c7=[%.4f,%.4f,%.4f,%.4f] "
+				"rtt=%d early=%d inject=%d full=%d pass_active=%d",
+				c70, c71, c72, c73, rtt_on, early, tonemap, full_mirr,
+				(int)g_pass_active);
+		}
+
 		if (rtt_on && early != 0 && (g_pass_active || g_in_segment))
 		{
 			if (tonemap)
 			{
+				log::line("[pscf] -> inject_into_tonemap_source");
 				if (!inject_into_tonemap_source(dev))
 				{
+					log::line("[pscf] inject FAILED, falling back to early composite");
 					if (g_in_segment) end_segment(dev);
 					g_pending_early_composite = true;
 				}
@@ -547,6 +621,7 @@ namespace cod4mirror::mirror
 			g_pending_early_composite = false;
 			if (g_pass_active || g_in_segment)
 			{
+				log::line("[after_draw] pending early composite -> final_composite");
 				if (g_in_segment) end_segment(dev);
 				final_composite(dev);
 			}
@@ -554,6 +629,7 @@ namespace cod4mirror::mirror
 		if (g_pending_fullmirror_flip)
 		{
 			g_pending_fullmirror_flip = false;
+			log::line("[after_draw] pending fullmirror flip -> do_fullscreen_flip");
 			do_fullscreen_flip(dev);
 		}
 	}
@@ -577,10 +653,18 @@ namespace cod4mirror::mirror
 		// is at least visible (even if it covers the HUD).
 		if (g_pass_active || g_in_segment)
 		{
+			log::line("[end_scene] safety-net final_composite (pass_active=%d in_seg=%d)",
+				(int)g_pass_active, (int)g_in_segment);
 			final_composite(dev);
 		}
 		// r_fullMirror == 2: brute-force flip everything (incl. HUD).
 		const int full_mirr = engine::read_dvar_int(d_full_mirror);
-		if (full_mirr == 2) do_fullscreen_flip(dev);
+		if (full_mirr == 2)
+		{
+			static unsigned s_log_throttle = 0;
+			if ((s_log_throttle++ % 120) == 0)
+				log::line("[end_scene] full_mirror=2 -> do_fullscreen_flip");
+			do_fullscreen_flip(dev);
+		}
 	}
 }

@@ -3,7 +3,9 @@
 // Addresses confirmed against the user-supplied iw3mp.exe (PE timestamp
 // 2008-06-19, 3.3 MB):
 //
-//   Dvar_RegisterInt     = 0x0056C600   __cdecl, 10 args
+//   Dvar_Register        = 0x0056C130   __cdecl, unified register fn
+//                          (verified via xref to "Can't create dvar '%s':
+//                          %i dvars already exist" at .rdata 0x6F3EC0)
 //   CG_DObjGetWorldBoneMatrix = 0x00433F00   __cdecl, prologue 8 bytes
 //                                            (83 EC 30 53 8B 5C 24 38)
 //
@@ -55,7 +57,7 @@ namespace cod4mirror::engine
 		int min_or_zero, int max_or_zero); // numeric range (int reinterpret)
 
 	// vanilla iw3mp 1.7 (PE 2008-06-19)
-	inline constexpr std::uintptr_t kAddr_Dvar_Register     = 0x0056C600;
+	inline constexpr std::uintptr_t kAddr_Dvar_Register     = 0x0056C130;
 	inline constexpr std::uintptr_t kAddr_CG_DObjGetWorldBoneMatrix = 0x00433F00;
 
 	inline DvarRegisterFn Dvar_RegisterRaw()
