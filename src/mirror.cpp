@@ -45,6 +45,7 @@ namespace cod4mirror::mirror
 		engine::dvar_s* d_mirror_fx_dist      = nullptr;
 		engine::dvar_s* d_mirror_fx_axis_idx  = nullptr;
 		engine::dvar_s* d_mirror_fx_log       = nullptr;
+		engine::dvar_s* d_depth_fix           = nullptr;
 
 		bool g_init_done = false;
 
@@ -133,6 +134,10 @@ namespace cod4mirror::mirror
 			d_mirror_fx_log    = Dvar_RegisterInt("r_mirrorViewmodel_mirrorFxLog",
 				"cod4mirror: log up to N tag-mirror reflections. Decrements on each "
 				"hit; set to a positive int to dump a one-shot trace.", 0, 0, 1024);
+			d_depth_fix        = Dvar_RegisterInt("r_mirrorViewmodel_depthFix",
+				"cod4mirror: rewrite main depth at gun pixels so post-process AO "
+				"(e.g. ReShade MXAO) sees the mirrored gun, not the wall behind. "
+				"0=off, 1=on (default).", 1, 0, 1);
 
 			log::line("[register] dvar handles: rtt=%p tonemap=%p early=%p "
 				"srgb=%p blend=%p full=%p fx=%p fxAxis=%p fxDist=%p",
@@ -242,6 +247,90 @@ namespace cod4mirror::mirror
 			if (g_saved_color) { dev->SetRenderTarget(0, g_saved_color); g_saved_color->Release(); g_saved_color = nullptr; }
 			if (g_saved_depth) { dev->SetDepthStencilSurface(g_saved_depth); g_saved_depth->Release(); g_saved_depth = nullptr; }
 			else                 dev->SetDepthStencilSurface(nullptr);
+		}
+
+		// Rewrite the engine's MAIN depth buffer at the pixels covered by
+		// the mirrored gun, so post-process AO (e.g. ReShade MXAO) doesn't
+		// sample the wall behind the gun and bleed shadow through it.
+		//
+		// Two passes, both with COLORWRITE=0, ZWRITE=TRUE, ZFUNC=ALWAYS,
+		// alpha-test on the RTT alpha:
+		//   1. UV unflipped, z=1 (far): clears any "ghost gun" depth left
+		//      on the right side of the screen by an engine z-prefill we
+		//      didn't redirect into the off-screen target. MXAO then sees
+		//      the wall/world behind, not the invisible gun shape.
+		//   2. UV horizontally flipped, z=0 (near): writes near depth at
+		//      the mirrored gun's pixels on the LEFT side. MXAO sees a
+		//      close object and skips the far-wall AO contribution that
+		//      was bleeding through the composite.
+		//
+		// Caller invariants: engine main render-target + main depth-stencil
+		// MUST be bound. We don't touch the render target — only depth.
+		void apply_main_depth_fix(IDirect3DDevice9* dev)
+		{
+			if (!g_pass_active || !g_tex || g_w <= 0 || g_h <= 0) return;
+
+			IDirect3DStateBlock9* sb = nullptr;
+			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
+
+			dev->SetVertexShader(nullptr);
+			dev->SetPixelShader(nullptr);
+			dev->SetRenderState(D3DRS_ZENABLE,           TRUE);
+			dev->SetRenderState(D3DRS_ZWRITEENABLE,      TRUE);
+			dev->SetRenderState(D3DRS_ZFUNC,             D3DCMP_ALWAYS);
+			dev->SetRenderState(D3DRS_CULLMODE,          D3DCULL_NONE);
+			dev->SetRenderState(D3DRS_LIGHTING,          FALSE);
+			dev->SetRenderState(D3DRS_FOGENABLE,         FALSE);
+			dev->SetRenderState(D3DRS_ALPHABLENDENABLE,  FALSE);
+			dev->SetRenderState(D3DRS_ALPHATESTENABLE,   TRUE);
+			dev->SetRenderState(D3DRS_ALPHAFUNC,         D3DCMP_GREATER);
+			dev->SetRenderState(D3DRS_ALPHAREF,          0x10);
+			dev->SetRenderState(D3DRS_STENCILENABLE,     FALSE);
+			dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,   FALSE);
+			// disable color writes — we ONLY want depth to be written
+			dev->SetRenderState(D3DRS_COLORWRITEENABLE,  0);
+
+			dev->SetTextureStageState(0, D3DTSS_COLOROP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAOP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+			dev->SetSamplerState(0, D3DSAMP_MINFILTER,   D3DTEXF_POINT);
+			dev->SetSamplerState(0, D3DSAMP_MAGFILTER,   D3DTEXF_POINT);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSU,    D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSV,    D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+			dev->SetTexture(0, g_tex);
+			dev->SetVertexDeclaration(nullptr);
+			dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+
+			const float W = (float)g_w;
+			const float H = (float)g_h;
+			struct V { float x, y, z, rhw, u, v; };
+
+			// Pass 1: clear original-gun ghost on the right side. UV not
+			// flipped, z=1.0 — every pixel the engine drew gun-alpha into
+			// gets its main depth pushed to far so AO ignores it.
+			V pass1[4] = {
+				{ -0.5f,    -0.5f,    1.0f, 1.0f, 0.0f, 0.0f },
+				{  W-0.5f,  -0.5f,    1.0f, 1.0f, 1.0f, 0.0f },
+				{ -0.5f,     H-0.5f,  1.0f, 1.0f, 0.0f, 1.0f },
+				{  W-0.5f,   H-0.5f,  1.0f, 1.0f, 1.0f, 1.0f },
+			};
+			dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, pass1, sizeof(V));
+
+			// Pass 2: stamp near depth on the mirrored side. UV flipped (u
+			// inverted), z=0.0 — main depth at the visible mirror gun gets
+			// near-plane depth so MXAO treats it as a foreground object.
+			V pass2[4] = {
+				{ -0.5f,    -0.5f,    0.0f, 1.0f, 1.0f, 0.0f },
+				{  W-0.5f,  -0.5f,    0.0f, 1.0f, 0.0f, 0.0f },
+				{ -0.5f,     H-0.5f,  0.0f, 1.0f, 1.0f, 1.0f },
+				{  W-0.5f,   H-0.5f,  0.0f, 1.0f, 0.0f, 1.0f },
+			};
+			dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, pass2, sizeof(V));
+
+			if (sb) { sb->Apply(); sb->Release(); }
 		}
 
 		// Composite mirrored gun into the engine's currently-bound texture
@@ -650,6 +739,19 @@ namespace cod4mirror::mirror
 
 		if (rtt_on && early != 0 && (g_pass_active || g_in_segment))
 		{
+			// Stamp main-depth corrections BEFORE we swap the render target
+			// in inject_into_tonemap_source — at this point the engine's
+			// main color + main depth-stencil are still bound, which is
+			// exactly what apply_main_depth_fix needs (it only writes
+			// depth, COLORWRITEENABLE=0). Skip cheaply if user disabled it.
+			if (engine::read_dvar_int(d_depth_fix))
+			{
+				if (g_in_segment) end_segment(dev);
+				static unsigned s_dfx = 0;
+				if (s_dfx++ < 4) log::line("[pscf] -> apply_main_depth_fix");
+				apply_main_depth_fix(dev);
+			}
+
 			if (tonemap)
 			{
 				{ static unsigned s = 0; if (s++ < 4) log::line("[pscf] -> inject_into_tonemap_source"); }
