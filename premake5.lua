@@ -37,7 +37,9 @@ project "cod4mirror"
 	-- the real d3d9.dll's export table.
 	linkoptions { "/DEF:\"%{prj.location}../src/d3d9.def\"" }
 
-	flags { "MultiProcessorCompile", "NoIncrementalLink" }
+	-- modern premake5 (5.0.0-beta7+) replaces flags{...} with dedicated APIs
+	multiprocessorcompile "On"
+	incrementallink "Off"
 
 	defines { "WIN32", "_WINDOWS", "_USRDLL", "NOMINMAX", "WIN32_LEAN_AND_MEAN" }
 
@@ -53,7 +55,7 @@ project "cod4mirror"
 		runtime  "Release"
 		symbols  "On"          -- keep PDB for crash debugging
 		optimize "Speed"
-		flags    { "LinkTimeOptimization" }
+		linktimeoptimization "On"
 	filter {}
 
 	filter "system:windows"
