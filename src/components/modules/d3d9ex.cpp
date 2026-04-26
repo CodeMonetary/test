@@ -1454,10 +1454,11 @@ namespace components
 		{
 			mirror_dump_inc_vscf();
 			_renderer::mirror_dump_write(
-				"  VSCF start=%u count=%u vm_active=%d flip=%d dhp=%d stdp=%d\n",
+				"  VSCF start=%u count=%u vm_active=%d flip=%d dhp=%d stdp=%d hud_dvar=%d hud_ortho=%d gun_seen=%d\n",
 				StartRegister, Vector4fCount, (int)_renderer::mirror_viewmodel_active,
 				(out_data != pConstantData) ? 1 : 0,
-				(int)is_depth_hack_proj, (int)is_std_proj);
+				(int)is_depth_hack_proj, (int)is_std_proj,
+				hud_mirror, (int)is_hud_ortho, (int)mirror_rtt::g_pass_active);
 			const UINT rows = (Vector4fCount > 16) ? 16 : Vector4fCount;
 			for (UINT i = 0; i < rows; ++i)
 			{
