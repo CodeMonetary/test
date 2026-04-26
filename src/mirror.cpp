@@ -70,7 +70,31 @@ namespace cod4mirror::mirror
 		unsigned g_vscf_dhp_hits        = 0;
 		unsigned g_pscf_tonemap_hits    = 0;
 		bool     g_logged_first_present = false;
+		bool     g_logged_first_endscene = false;
+		bool     g_logged_first_vscf    = false;
+		bool     g_logged_first_pscf    = false;
 		float    g_min_c23 = 1e9f, g_max_c23 = -1e9f;
+
+		// Lazy init. Some IW3 dispatch paths route Present() around the d3d9
+		// wrapper (confirmed by iw3xo: 0 Present hits vs many BeginScene), so
+		// we cannot rely on Present being called at all. Instead, EVERY mirror
+		// entry point calls this on first invocation — the first hook to fire
+		// (PSCF, VSCF, EndScene, or Present) will trigger registration.
+		void register_all();
+		void lazy_init(const char* who)
+		{
+			if (g_init_done) return;
+			g_init_done = true;
+			log::reset();
+			log::line("[init] first hook fired: %s — initializing dvars", who);
+			__try { register_all(); }
+			__except (EXCEPTION_EXECUTE_HANDLER)
+			{
+				log::line("[register] !!! SEH exception during Dvar_Register "
+					"call — address 0x%08X is wrong",
+					(unsigned)engine::kAddr_Dvar_Register);
+			}
+		}
 
 		// ---- dvar registration -------------------------------------------
 		void register_all()
@@ -487,43 +511,11 @@ namespace cod4mirror::mirror
 	// ---- public entry points ---------------------------------------------
 	void on_present(IDirect3DDevice9* /*dev*/)
 	{
-		if (!g_init_done)
-		{
-			g_init_done = true;
-			log::reset();
-			log::line("[present] first present — initializing dvars");
-			__try { register_all(); }
-			__except (EXCEPTION_EXECUTE_HANDLER)
-			{
-				log::line("[register] !!! SEH exception during Dvar_Register "
-					"call — address 0x%08X is wrong",
-					(unsigned)engine::kAddr_Dvar_Register);
-			}
-		}
+		lazy_init("Present");
 		if (!g_logged_first_present)
 		{
 			g_logged_first_present = true;
 			log::line("[present] hooks live (Present hook fired)");
-		}
-
-		// Once per second, log a heartbeat with frame counters and dvar values
-		// so we can see whether the SetXxxShaderConstantF hooks are firing at
-		// all and whether any signature ever matched. Set period to 60 frames
-		// (~1 sec @ 60 fps).
-		g_frame++;
-		if ((g_frame % 60) == 0)
-		{
-			const int v_rtt    = engine::read_dvar_int(d_rtt);
-			const int v_full   = engine::read_dvar_int(d_full_mirror);
-			const int v_inject = engine::read_dvar_int(d_tonemap_inject);
-			const int v_early  = engine::read_dvar_int(d_early_composite);
-			log::line("[hb] frame=%u vscf_calls=%u dhp_hits=%u pscf_calls=%u "
-				"tonemap_hits=%u rtt=%d full=%d inject=%d early=%d c23=[%.4f..%.4f]",
-				g_frame, g_vscf_calls, g_vscf_dhp_hits, g_pscf_calls,
-				g_pscf_tonemap_hits, v_rtt, v_full, v_inject, v_early,
-				g_min_c23, g_max_c23);
-			g_vscf_calls = g_pscf_calls = g_vscf_dhp_hits = g_pscf_tonemap_hits = 0;
-			g_min_c23 = 1e9f; g_max_c23 = -1e9f;
 		}
 
 		// Frame-boundary safety: any RTT state should already be torn down
@@ -537,6 +529,12 @@ namespace cod4mirror::mirror
 	void on_set_vertex_shader_constant_f(IDirect3DDevice9* dev, UINT start,
 		const float* data, UINT count)
 	{
+		lazy_init("VSCF");
+		if (!g_logged_first_vscf)
+		{
+			g_logged_first_vscf = true;
+			log::line("[vscf] hook live (start=%u count=%u)", start, count);
+		}
 		g_vscf_calls++;
 		if (!data || start != 0 || count != 4) return;
 		const float c23 = data[11]; // c2[3]
@@ -566,6 +564,12 @@ namespace cod4mirror::mirror
 	void on_set_pixel_shader_constant_f(IDirect3DDevice9* dev, UINT start,
 		const float* data, UINT count)
 	{
+		lazy_init("PSCF");
+		if (!g_logged_first_pscf)
+		{
+			g_logged_first_pscf = true;
+			log::line("[pscf] hook live (start=%u count=%u)", start, count);
+		}
 		g_pscf_calls++;
 		if (!data || start != 7 || count < 1) return;
 
@@ -648,6 +652,32 @@ namespace cod4mirror::mirror
 
 	void on_end_scene(IDirect3DDevice9* dev)
 	{
+		lazy_init("EndScene");
+		if (!g_logged_first_endscene)
+		{
+			g_logged_first_endscene = true;
+			log::line("[end_scene] hook live (EndScene hook fired)");
+		}
+
+		// EndScene is our reliable per-frame hook (Present can be routed
+		// around the wrapper on some IW3 paths). Heartbeat + frame-boundary
+		// state reset live here.
+		g_frame++;
+		if ((g_frame % 60) == 0)
+		{
+			const int v_rtt    = engine::read_dvar_int(d_rtt);
+			const int v_full   = engine::read_dvar_int(d_full_mirror);
+			const int v_inject = engine::read_dvar_int(d_tonemap_inject);
+			const int v_early  = engine::read_dvar_int(d_early_composite);
+			log::line("[hb] frame=%u vscf=%u dhp=%u pscf=%u tonemap=%u "
+				"rtt=%d full=%d inject=%d early=%d c23=[%.4f..%.4f]",
+				g_frame, g_vscf_calls, g_vscf_dhp_hits, g_pscf_calls,
+				g_pscf_tonemap_hits, v_rtt, v_full, v_inject, v_early,
+				g_min_c23, g_max_c23);
+			g_vscf_calls = g_pscf_calls = g_vscf_dhp_hits = g_pscf_tonemap_hits = 0;
+			g_min_c23 = 1e9f; g_max_c23 = -1e9f;
+		}
+
 		// Safety-net composite: if neither tonemap-inject nor early-composite
 		// fired this frame, blit the off-screen onto the BB now so the gun
 		// is at least visible (even if it covers the HUD).
@@ -666,5 +696,11 @@ namespace cod4mirror::mirror
 				log::line("[end_scene] full_mirror=2 -> do_fullscreen_flip");
 			do_fullscreen_flip(dev);
 		}
+
+		// Frame-boundary state reset (mirrors what Present used to do).
+		g_pass_active             = false;
+		g_in_segment              = false;
+		g_pending_early_composite = false;
+		g_pending_fullmirror_flip = false;
 	}
 }
