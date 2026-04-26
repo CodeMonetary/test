@@ -13,12 +13,6 @@ namespace components
 		// set when the viewmodel is being submitted with r_mirrorViewmodel active
 		// consumed by d3d9ex::SetRenderState to invert D3DRS_CULLMODE on viewmodel draws
 		static volatile bool mirror_viewmodel_active;
-		// v34: world-mirror state for r_fullMirror==3 (true-mirror via
-		// projection flip). Set in set_gunfov when scene is non-viewmodel
-		// and r_fullMirror==3. Used by D3D9Device::SetRenderState to flip
-		// CULLMODE so the inverted triangle winding from the X-flipped
-		// projection still renders front-faces.
-		static volatile bool mirror_world_active;
 
 		// r_mirrorViewmodel v8: armed when a depth-hack proj VSCF is uploaded; decremented
 		// per non-dhp matrix VSCF; cleared on std-proj VSCF. Used by SetVertexShaderConstantF
