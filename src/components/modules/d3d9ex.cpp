@@ -1328,7 +1328,36 @@ namespace components
 		// projection, not the world/gun projections.
 		const int hud_mirror = dvars::r_hudMirror
 			? dvars::r_hudMirror->current.integer : 0;
-		const bool is_hud_ortho = is_mtx_at_zero && (c23 > 0.5f && c23 < 1.5f);
+		// v34.3: HUD detection signature derived from a real frame dump.
+		// True HUD 2D-ortho matrix has the fingerprint:
+		//   c2 = (0, 0, 0, 1)   c3 = (0, 0, 0, 1)
+		//   c0 = (sx, 0, 0, tx) c1 = (0, sy, 0, ty)  with sx,sy ~ 1/screen
+		// Earlier loose match (c2[3] in [0.5,1.5]) caught a non-HUD shader
+		// matrix at frame start with c2[3]=0.545 (and tiny c2[0..2] but
+		// non-zero) which broke the world. Tight match below: c2 must be
+		// (~0, ~0, ~0, ~1) AND c3 must be (~0, ~0, ~0, ~1). Identity matrix
+		// has c2=(0,0,1,0) so it's correctly excluded by the c2[2] check.
+		bool is_hud_ortho = false;
+		if (is_mtx_at_zero)
+		{
+			const float c20 = pConstantData[8];
+			const float c21 = pConstantData[9];
+			const float c22 = pConstantData[10];
+			const float c30 = pConstantData[12];
+			const float c31 = pConstantData[13];
+			const float c32 = pConstantData[14];
+			const float c33 = pConstantData[15];
+			const float eps = 1e-4f;
+			is_hud_ortho =
+				(c20 > -eps && c20 < eps) &&
+				(c21 > -eps && c21 < eps) &&
+				(c22 > -eps && c22 < eps) &&
+				(c23 > 1.0f - 1e-3f && c23 < 1.0f + 1e-3f) &&
+				(c30 > -eps && c30 < eps) &&
+				(c31 > -eps && c31 < eps) &&
+				(c32 > -eps && c32 < eps) &&
+				(c33 > 1.0f - 1e-3f && c33 < 1.0f + 1e-3f);
+		}
 		float local_mtx_hud[16];
 		if (hud_mirror == 1 && is_hud_ortho)
 		{
