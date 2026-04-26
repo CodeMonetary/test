@@ -20,29 +20,70 @@
 
 namespace
 {
+	HMODULE g_self      = nullptr; // our own DLL — used to find sibling files
 	HMODULE g_real_d3d9 = nullptr;
 
+	// Build an absolute path "<our DLL folder>\<name>". Returns false if our
+	// own module path isn't available or doesn't fit.
+	bool sibling_path(const char* name, char* out, size_t cap)
+	{
+		if (!g_self) return false;
+		char dir[MAX_PATH];
+		const DWORD n = GetModuleFileNameA(g_self, dir, MAX_PATH);
+		if (n == 0 || n >= MAX_PATH) return false;
+		// strip the filename portion
+		for (DWORD i = n; i > 0; --i)
+		{
+			if (dir[i - 1] == '\\' || dir[i - 1] == '/') { dir[i] = 0; break; }
+			dir[i - 1] = 0;
+		}
+		const size_t dl = lstrlenA(dir);
+		const size_t nl = lstrlenA(name);
+		if (dl + nl + 1 > cap) return false;
+		lstrcpyA(out, dir);
+		lstrcatA(out, name);
+		return true;
+	}
+
 	// Resolve a symbol from the real d3d9.dll (cached LoadLibrary on first
-	// call). Returns nullptr if symbol/library missing.
+	// call). Chain-loading order:
+	//   1) <game folder>\d3d9_chain.dll   (e.g. ReShade renamed to chain)
+	//   2) %SystemRoot%\System32\d3d9.dll (vanilla fallback)
+	// This lets the user stack our proxy on top of ReShade (or any other
+	// d3d9 wrapper) without renaming exports. Detected via file-existence
+	// check so absence of the chain file is silent.
 	FARPROC resolve(const char* name)
 	{
 		if (!g_real_d3d9)
 		{
-			char path[MAX_PATH];
-			const UINT n = GetSystemDirectoryA(path, MAX_PATH);
-			if (n == 0 || n >= MAX_PATH - 11) return nullptr;
-			lstrcatA(path, "\\d3d9.dll");
-			g_real_d3d9 = LoadLibraryA(path);
+			char chain[MAX_PATH];
+			if (sibling_path("d3d9_chain.dll", chain, MAX_PATH) &&
+				GetFileAttributesA(chain) != INVALID_FILE_ATTRIBUTES)
+			{
+				// Use absolute path so Windows doesn't search cwd / our dir
+				// recursively (which would re-load us and infinite-loop).
+				g_real_d3d9 = LoadLibraryA(chain);
+			}
+			if (!g_real_d3d9)
+			{
+				char sys[MAX_PATH];
+				const UINT n = GetSystemDirectoryA(sys, MAX_PATH);
+				if (n == 0 || n >= MAX_PATH - 11) return nullptr;
+				lstrcatA(sys, "\\d3d9.dll");
+				g_real_d3d9 = LoadLibraryA(sys);
+			}
 		}
 		return g_real_d3d9 ? GetProcAddress(g_real_d3d9, name) : nullptr;
 	}
 }
 
-BOOL APIENTRY DllMain(HMODULE /*hModule*/, DWORD reason, LPVOID /*lpReserved*/)
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*lpReserved*/)
 {
 	switch (reason)
 	{
 	case DLL_PROCESS_ATTACH:
+		g_self = hModule;
+		DisableThreadLibraryCalls(hModule);
 		// preload real d3d9 so the first export call has no latency hit.
 		resolve("Direct3DCreate9");
 		break;
