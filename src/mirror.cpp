@@ -1,6 +1,28 @@
-// cod4mirror — Phase 2a stub. On first Present we register all the user-
-// facing dvars by calling vanilla iw3mp.exe's Dvar_RegisterInt at 0x56C600.
-// Phase 3 will add the actual RTT mirror pipeline.
+// cod4mirror — RTT mirror viewmodel pipeline ported from iw3xo v15-v32.
+//
+// Pipeline (matches iw3xo behaviour for r_mirrorViewmodel_rtt 1):
+//
+//   * VSCF c0..c3 with c2[3] in [-0.5, -0.02]   = depth-hack proj (gun pass start)
+//     -> begin_segment: bind off-screen RT (color+depth), clear once per frame
+//   * VSCF c0..c3 with c2[3] not in dhp range   = world / 2D proj
+//     -> end_segment: restore engine RT (off-screen accumulates across multiple
+//        gun segments without re-clearing so the lit pass z-tests against the
+//        z-prefill pass)
+//   * PSCF c7 with shape (c70=c71=c72 in [-0.2, 0), c73 in (1, 5))
+//     = engine's final tonemap/output. We either:
+//     - composite the off-screen mirror into the engine's tonemap SOURCE
+//       texture (r_mirrorViewmodel_rttTonemapInject 1, default), so the
+//       gun gets the same film/grade as the world; or
+//     - set g_pending_early_composite so the final composite fires AFTER
+//       the next draw (the engine's tonemap-output write).
+//   * EndScene: safety-net composite if neither path hit; r_fullMirror==2
+//     does an unconditional fullscreen horizontal flip.
+//
+// The "mirror" effect comes from the composite quad's UVs being horizontally
+// inverted: the off-screen target was rendered with the engine's normal
+// projection (not flipped), so flipping the UVs at composite time produces
+// the visual mirror. Vertex tangents and culling stay correct internally,
+// which avoids the lighting/cull artifacts the legacy matrix-flip path had.
 #include "mirror.h"
 #include "engine.h"
 #include <cstdio>
@@ -9,11 +31,7 @@ namespace cod4mirror::mirror
 {
 	namespace
 	{
-		bool g_init_done = false;
-
-		// dvar handles. Phase 3 will read .current.integer / .current.value
-		// from these to drive runtime behaviour. Phase 2a registers them so
-		// the user can confirm the DLL is talking to the engine.
+		// ---- dvar handles -------------------------------------------------
 		engine::dvar_s* d_rtt                 = nullptr;
 		engine::dvar_s* d_tonemap_inject      = nullptr;
 		engine::dvar_s* d_early_composite     = nullptr;
@@ -24,90 +42,545 @@ namespace cod4mirror::mirror
 		engine::dvar_s* d_mirror_fx_axis      = nullptr;
 		engine::dvar_s* d_mirror_fx_dist      = nullptr;
 
-		void debug_log(const char* msg)
-		{
-			OutputDebugStringA(msg);
-		}
+		bool g_init_done = false;
 
+		// ---- RTT state ----------------------------------------------------
+		IDirect3DTexture9* g_tex          = nullptr;
+		IDirect3DSurface9* g_color        = nullptr;
+		IDirect3DSurface9* g_depth        = nullptr;
+		IDirect3DSurface9* g_saved_color  = nullptr;
+		IDirect3DSurface9* g_saved_depth  = nullptr;
+		int  g_w = 0;
+		int  g_h = 0;
+		bool g_pass_active                = false;
+		bool g_in_segment                 = false;
+		bool g_pending_early_composite    = false;
+
+		IDirect3DTexture9* g_flip_tex     = nullptr;
+		IDirect3DSurface9* g_flip_surf    = nullptr;
+		int  g_flip_w = 0;
+		int  g_flip_h = 0;
+		bool g_pending_fullmirror_flip    = false;
+
+		void debug_log(const char* msg) { OutputDebugStringA(msg); }
+
+		// ---- dvar registration -------------------------------------------
 		void register_all()
 		{
 			using namespace engine;
-
-			d_rtt = Dvar_RegisterInt("r_mirrorViewmodel_rtt",
-				"cod4mirror: master switch for RTT mirror viewmodel. 0=off, 1=on.",
-				0, 0, 1);
-
-			d_tonemap_inject = Dvar_RegisterInt("r_mirrorViewmodel_rttTonemapInject",
-				"cod4mirror: composite mirrored gun into engine's tonemap source "
-				"(correct lighting). 0=legacy bb composite, 1=tonemap inject (default).",
+			d_rtt              = Dvar_RegisterInt("r_mirrorViewmodel_rtt",
+				"cod4mirror: master switch for RTT mirror viewmodel. 0=off, 1=on.", 0, 0, 1);
+			d_tonemap_inject   = Dvar_RegisterInt("r_mirrorViewmodel_rttTonemapInject",
+				"cod4mirror: composite into tonemap source (correct grade). 0=bb, 1=tonemap.",
 				1, 0, 1);
-
-			d_early_composite = Dvar_RegisterInt("r_mirrorViewmodel_rttEarlyComposite",
-				"cod4mirror: 0=composite at EndScene (gun covers HUD); "
-				"1=composite at PSCF c7 fingerprint (HUD on top of gun, default); "
-				"2=both (diagnostic).",
-				1, 0, 2);
-
-			d_composite_srgb = Dvar_RegisterInt("r_mirrorViewmodel_compositeSrgb",
-				"cod4mirror: sRGB encoding for composite. 0=raw linear, "
-				"1=linear->sRGB write (default), 2=sRGB sample only, 3=both.",
-				1, 0, 3);
-
-			d_rtt_blend = Dvar_RegisterInt("r_mirrorViewmodel_rttBlend",
-				"cod4mirror: composite blend mode. "
-				"0=SRCALPHA/INVSRCALPHA, 1=+ALPHATEST, "
-				"2=ONE/ONE additive (default), 3=+ALPHATEST.",
+			d_early_composite  = Dvar_RegisterInt("r_mirrorViewmodel_rttEarlyComposite",
+				"cod4mirror: 0=composite at EndScene (gun over HUD); "
+				"1=composite at PSCF c7 (HUD over gun, default); 2=both.", 1, 0, 2);
+			d_composite_srgb   = Dvar_RegisterInt("r_mirrorViewmodel_compositeSrgb",
+				"cod4mirror: 0=raw, 1=sRGB write (default), 2=sRGB read, 3=both.", 1, 0, 3);
+			d_rtt_blend        = Dvar_RegisterInt("r_mirrorViewmodel_rttBlend",
+				"cod4mirror: blend mode. 0=alpha, 1=alpha+test, 2=add (default), 3=add+test.",
 				2, 0, 3);
-
-			d_full_mirror = Dvar_RegisterInt("r_fullMirror",
-				"cod4mirror: full-screen mirror for montage. "
-				"0=off, 1=mirror world+gun before HUD (HUD intact), "
-				"2=mirror everything including HUD.",
+			d_full_mirror      = Dvar_RegisterInt("r_fullMirror",
+				"cod4mirror: 0=off, 1=mirror world+gun before HUD, 2=mirror everything.",
 				0, 0, 2);
+			d_mirror_fx        = Dvar_RegisterInt("r_mirrorViewmodel_mirrorFx",
+				"cod4mirror: mirror first-person FX (Phase 4, not yet wired).", 0, 0, 1);
+			d_mirror_fx_axis   = Dvar_RegisterInt("r_mirrorViewmodel_mirrorFxAxis",
+				"cod4mirror: FX axis mode. 0=origin, 1=full-reflect, 2=RH-mirror.", 2, 0, 2);
+			d_mirror_fx_dist   = Dvar_RegisterFloat("r_mirrorViewmodel_mirrorFxDist",
+				"cod4mirror: FX mirror distance threshold (units).", 64.0f, 0.0f, 4096.0f);
 
-			d_mirror_fx = Dvar_RegisterInt("r_mirrorViewmodel_mirrorFx",
-				"cod4mirror: mirror first-person FX (muzzleflash, brass) — "
-				"requires Phase 4 hook (not yet wired in this build).",
-				0, 0, 1);
-
-			d_mirror_fx_axis = Dvar_RegisterInt("r_mirrorViewmodel_mirrorFxAxis",
-				"cod4mirror: FX axis mirror mode. 0=origin only, "
-				"1=full reflect (CRASH), 2=RH-mirror (recommended).",
-				2, 0, 2);
-
-			d_mirror_fx_dist = Dvar_RegisterFloat("r_mirrorViewmodel_mirrorFxDist",
-				"cod4mirror: FX mirror distance threshold (world units).",
-				64.0f, 0.0f, 4096.0f);
-
-			char buf[256];
+			char buf[160];
 			std::snprintf(buf, sizeof(buf),
-				"[cod4mirror] dvars registered: rtt=%p, fullMirror=%p\n",
+				"[cod4mirror] dvars registered: rtt=%p fullMirror=%p\n",
 				(void*)d_rtt, (void*)d_full_mirror);
 			debug_log(buf);
 		}
-	}
 
+		// ---- RTT off-screen target management -----------------------------
+		void release_targets()
+		{
+			if (g_color) { g_color->Release(); g_color = nullptr; }
+			if (g_depth) { g_depth->Release(); g_depth = nullptr; }
+			if (g_tex)   { g_tex->Release();   g_tex   = nullptr; }
+			g_w = g_h = 0;
+		}
+
+		bool ensure_targets(IDirect3DDevice9* dev)
+		{
+			IDirect3DSurface9* bb = nullptr;
+			if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return false;
+			D3DSURFACE_DESC bd; bb->GetDesc(&bd); bb->Release();
+			if (g_tex && (int)bd.Width == g_w && (int)bd.Height == g_h) return true;
+			release_targets();
+			if (FAILED(dev->CreateTexture(bd.Width, bd.Height, 1, D3DUSAGE_RENDERTARGET,
+				D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_tex, nullptr))) return false;
+			if (FAILED(g_tex->GetSurfaceLevel(0, &g_color))) { release_targets(); return false; }
+			if (FAILED(dev->CreateDepthStencilSurface(bd.Width, bd.Height, D3DFMT_D24S8,
+				D3DMULTISAMPLE_NONE, 0, TRUE, &g_depth, nullptr))) { release_targets(); return false; }
+			g_w = (int)bd.Width;
+			g_h = (int)bd.Height;
+			return true;
+		}
+
+		void begin_segment(IDirect3DDevice9* dev)
+		{
+			if (g_in_segment) return;
+			if (!ensure_targets(dev)) return;
+			if (FAILED(dev->GetRenderTarget(0, &g_saved_color))) { g_saved_color = nullptr; return; }
+			if (FAILED(dev->GetDepthStencilSurface(&g_saved_depth))) { g_saved_depth = nullptr; }
+			dev->SetRenderTarget(0, g_color);
+			dev->SetDepthStencilSurface(g_depth);
+			if (!g_pass_active)
+			{
+				dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL,
+					0x00000000, 1.0f, 0);
+				g_pass_active = true;
+			}
+			g_in_segment = true;
+		}
+
+		void end_segment(IDirect3DDevice9* dev)
+		{
+			if (!g_in_segment) return;
+			g_in_segment = false;
+			if (g_saved_color) { dev->SetRenderTarget(0, g_saved_color); g_saved_color->Release(); g_saved_color = nullptr; }
+			if (g_saved_depth) { dev->SetDepthStencilSurface(g_saved_depth); g_saved_depth->Release(); g_saved_depth = nullptr; }
+			else                 dev->SetDepthStencilSurface(nullptr);
+		}
+
+		// Composite mirrored gun into the engine's currently-bound texture
+		// (the tonemap source). Picks up the engine's grade automatically.
+		bool inject_into_tonemap_source(IDirect3DDevice9* dev)
+		{
+			if (g_in_segment) end_segment(dev);
+			if (!g_pass_active) return false;
+
+			IDirect3DBaseTexture9* source_base = nullptr;
+			IDirect3DTexture9*     source_tex  = nullptr;
+			IDirect3DSurface9*     source_surf = nullptr;
+			IDirect3DSurface9*     prev_color  = nullptr;
+			IDirect3DSurface9*     prev_depth  = nullptr;
+			IDirect3DStateBlock9*  sb          = nullptr;
+			bool ok = false;
+			const int blend_mode = engine::read_dvar_int(d_rtt_blend);
+			const float W = (float)g_w;
+			const float H = (float)g_h;
+			struct V { float x, y, z, rhw, u, v; };
+			V quad[4];
+
+			if (FAILED(dev->GetTexture(0, &source_base)) || !source_base) goto cleanup;
+			if (source_base->GetType() != D3DRTYPE_TEXTURE) goto cleanup;
+			source_tex = static_cast<IDirect3DTexture9*>(source_base);
+			source_tex->AddRef();
+			if (FAILED(source_tex->GetSurfaceLevel(0, &source_surf)) || !source_surf) goto cleanup;
+			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
+			if (FAILED(dev->GetRenderTarget(0, &prev_color)) || !prev_color) goto cleanup;
+			if (FAILED(dev->GetDepthStencilSurface(&prev_depth))) prev_depth = nullptr;
+
+			dev->SetRenderTarget(0, source_surf);
+			dev->SetDepthStencilSurface(nullptr);
+			dev->SetVertexShader(nullptr);
+			dev->SetPixelShader(nullptr);
+			dev->SetRenderState(D3DRS_ZENABLE,           FALSE);
+			dev->SetRenderState(D3DRS_ZWRITEENABLE,      FALSE);
+			dev->SetRenderState(D3DRS_CULLMODE,          D3DCULL_NONE);
+			dev->SetRenderState(D3DRS_LIGHTING,          FALSE);
+			dev->SetRenderState(D3DRS_FOGENABLE,         FALSE);
+			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,   FALSE);
+			dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+			dev->SetRenderState(D3DRS_COLORWRITEENABLE,
+				D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN |
+				D3DCOLORWRITEENABLE_BLUE | D3DCOLORWRITEENABLE_ALPHA);
+			dev->SetRenderState(D3DRS_STENCILENABLE,     FALSE);
+			dev->SetRenderState(D3DRS_BLENDOP,           D3DBLENDOP_ADD);
+			switch (blend_mode)
+			{
+			case 1:
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_SRCALPHA);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_INVSRCALPHA);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  TRUE);
+				dev->SetRenderState(D3DRS_ALPHAREF,         1);
+				dev->SetRenderState(D3DRS_ALPHAFUNC,        D3DCMP_GREATEREQUAL);
+				break;
+			case 2:
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  FALSE);
+				break;
+			case 3:
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  TRUE);
+				dev->SetRenderState(D3DRS_ALPHAREF,         1);
+				dev->SetRenderState(D3DRS_ALPHAFUNC,        D3DCMP_GREATEREQUAL);
+				break;
+			case 0:
+			default:
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_SRCALPHA);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_INVSRCALPHA);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  FALSE);
+				break;
+			}
+			dev->SetTextureStageState(0, D3DTSS_COLOROP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAOP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+			dev->SetSamplerState(0, D3DSAMP_MINFILTER,  D3DTEXF_LINEAR);
+			dev->SetSamplerState(0, D3DSAMP_MAGFILTER,  D3DTEXF_LINEAR);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSU,   D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSV,   D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+			dev->SetTexture(0, g_tex);
+			dev->SetVertexDeclaration(nullptr);
+			dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+
+			// UVs are horizontally inverted: u=1.0 on the left edge of the
+			// destination, u=0.0 on the right -> the off-screen contents are
+			// mirrored along the vertical axis when blitted.
+			quad[0] = { -0.5f,    -0.5f,    0.0f, 1.0f, 1.0f, 0.0f };
+			quad[1] = {  W-0.5f,  -0.5f,    0.0f, 1.0f, 0.0f, 0.0f };
+			quad[2] = { -0.5f,     H-0.5f,  0.0f, 1.0f, 1.0f, 1.0f };
+			quad[3] = {  W-0.5f,   H-0.5f,  0.0f, 1.0f, 0.0f, 1.0f };
+			dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(V));
+			ok = true;
+
+		cleanup:
+			if (prev_color) { dev->SetRenderTarget(0, prev_color); prev_color->Release(); }
+			if (prev_depth) { dev->SetDepthStencilSurface(prev_depth); prev_depth->Release(); }
+			else            { dev->SetDepthStencilSurface(nullptr); }
+			if (sb) { sb->Apply(); sb->Release(); }
+			if (source_surf) source_surf->Release();
+			if (source_tex)  source_tex->Release();
+			if (source_base) source_base->Release();
+			if (ok) g_pass_active = false;
+			return ok;
+		}
+
+		// Composite mirrored off-screen onto the back-buffer (legacy path
+		// when tonemap-inject is disabled or unavailable).
+		void final_composite(IDirect3DDevice9* dev)
+		{
+			if (g_in_segment) end_segment(dev);
+			if (!g_pass_active) return;
+			g_pass_active = false;
+
+			IDirect3DStateBlock9* sb = nullptr;
+			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
+
+			IDirect3DSurface9* prev_color = nullptr;
+			IDirect3DSurface9* bb_surface = nullptr;
+			bool bb_bound = false;
+			if (SUCCEEDED(dev->GetRenderTarget(0, &prev_color)))
+			{
+				if (SUCCEEDED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb_surface)))
+				{
+					if (prev_color != bb_surface)
+					{
+						dev->SetRenderTarget(0, bb_surface);
+						bb_bound = true;
+					}
+				}
+			}
+
+			dev->SetVertexShader(nullptr);
+			dev->SetPixelShader(nullptr);
+			dev->SetRenderState(D3DRS_ZENABLE,          FALSE);
+			dev->SetRenderState(D3DRS_ZWRITEENABLE,     FALSE);
+			dev->SetRenderState(D3DRS_CULLMODE,         D3DCULL_NONE);
+			dev->SetRenderState(D3DRS_LIGHTING,         FALSE);
+			dev->SetRenderState(D3DRS_FOGENABLE,        FALSE);
+
+			const int srgb_mode  = engine::read_dvar_int(d_composite_srgb);
+			const BOOL srgb_read  = (srgb_mode == 2 || srgb_mode == 3) ? TRUE : FALSE;
+			const BOOL srgb_write = (srgb_mode == 1 || srgb_mode == 3) ? TRUE : FALSE;
+			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,  srgb_write);
+			dev->SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE);
+			dev->SetRenderState(D3DRS_COLORWRITEENABLE,
+				D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN |
+				D3DCOLORWRITEENABLE_BLUE | D3DCOLORWRITEENABLE_ALPHA);
+			dev->SetRenderState(D3DRS_STENCILENABLE,    FALSE);
+
+			const int blend_mode = engine::read_dvar_int(d_rtt_blend);
+			dev->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+			switch (blend_mode)
+			{
+			case 1:
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_SRCALPHA);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_INVSRCALPHA);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  TRUE);
+				dev->SetRenderState(D3DRS_ALPHAREF,         1);
+				dev->SetRenderState(D3DRS_ALPHAFUNC,        D3DCMP_GREATEREQUAL);
+				break;
+			case 2:
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  FALSE);
+				break;
+			case 3:
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_ONE);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  TRUE);
+				dev->SetRenderState(D3DRS_ALPHAREF,         1);
+				dev->SetRenderState(D3DRS_ALPHAFUNC,        D3DCMP_GREATEREQUAL);
+				break;
+			case 0:
+			default:
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				dev->SetRenderState(D3DRS_SRCBLEND,         D3DBLEND_SRCALPHA);
+				dev->SetRenderState(D3DRS_DESTBLEND,        D3DBLEND_INVSRCALPHA);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,  FALSE);
+				break;
+			}
+			dev->SetTextureStageState(0, D3DTSS_COLOROP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAOP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+			dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+			dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSU,  D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSV,  D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, srgb_read);
+			dev->SetTexture(0, g_tex);
+			dev->SetVertexDeclaration(nullptr);
+			dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+
+			const float W = (float)g_w;
+			const float H = (float)g_h;
+			struct V { float x, y, z, rhw, u, v; };
+			V quad[4] = {
+				{ -0.5f,    -0.5f,    0.0f, 1.0f, 1.0f, 0.0f },
+				{  W-0.5f,  -0.5f,    0.0f, 1.0f, 0.0f, 0.0f },
+				{ -0.5f,     H-0.5f,  0.0f, 1.0f, 1.0f, 1.0f },
+				{  W-0.5f,   H-0.5f,  0.0f, 1.0f, 0.0f, 1.0f },
+			};
+			dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(V));
+
+			if (bb_bound && prev_color) { dev->SetRenderTarget(0, prev_color); }
+			if (bb_surface) bb_surface->Release();
+			if (prev_color) prev_color->Release();
+			if (sb) { sb->Apply(); sb->Release(); }
+		}
+
+		// ---- fullscreen mirror flip --------------------------------------
+		void release_flip_target()
+		{
+			if (g_flip_surf) { g_flip_surf->Release(); g_flip_surf = nullptr; }
+			if (g_flip_tex)  { g_flip_tex->Release();  g_flip_tex  = nullptr; }
+			g_flip_w = g_flip_h = 0;
+		}
+
+		bool ensure_flip_target(IDirect3DDevice9* dev)
+		{
+			IDirect3DSurface9* bb = nullptr;
+			if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return false;
+			D3DSURFACE_DESC bd; bb->GetDesc(&bd); bb->Release();
+			if (g_flip_tex && (int)bd.Width == g_flip_w && (int)bd.Height == g_flip_h) return true;
+			release_flip_target();
+			if (FAILED(dev->CreateTexture(bd.Width, bd.Height, 1, D3DUSAGE_RENDERTARGET,
+				bd.Format, D3DPOOL_DEFAULT, &g_flip_tex, nullptr))) return false;
+			if (FAILED(g_flip_tex->GetSurfaceLevel(0, &g_flip_surf))) { release_flip_target(); return false; }
+			g_flip_w = (int)bd.Width;
+			g_flip_h = (int)bd.Height;
+			return true;
+		}
+
+		bool do_fullscreen_flip(IDirect3DDevice9* dev)
+		{
+			if (!ensure_flip_target(dev)) return false;
+			IDirect3DSurface9* bb = nullptr;
+			if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return false;
+			IDirect3DSurface9*    prev_color = nullptr;
+			IDirect3DSurface9*    prev_depth = nullptr;
+			IDirect3DStateBlock9* sb         = nullptr;
+			bool ok = false;
+			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
+			if (FAILED(dev->GetRenderTarget(0, &prev_color))) prev_color = nullptr;
+			if (FAILED(dev->GetDepthStencilSurface(&prev_depth))) prev_depth = nullptr;
+
+			if (FAILED(dev->StretchRect(bb, nullptr, g_flip_surf, nullptr, D3DTEXF_NONE))) goto cleanup;
+
+			dev->SetRenderTarget(0, bb);
+			dev->SetDepthStencilSurface(nullptr);
+			dev->SetVertexShader(nullptr);
+			dev->SetPixelShader(nullptr);
+			dev->SetRenderState(D3DRS_ZENABLE,           FALSE);
+			dev->SetRenderState(D3DRS_ZWRITEENABLE,      FALSE);
+			dev->SetRenderState(D3DRS_CULLMODE,          D3DCULL_NONE);
+			dev->SetRenderState(D3DRS_LIGHTING,          FALSE);
+			dev->SetRenderState(D3DRS_FOGENABLE,         FALSE);
+			dev->SetRenderState(D3DRS_ALPHABLENDENABLE,  FALSE);
+			dev->SetRenderState(D3DRS_ALPHATESTENABLE,   FALSE);
+			dev->SetRenderState(D3DRS_STENCILENABLE,     FALSE);
+			dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,   FALSE);
+			dev->SetRenderState(D3DRS_COLORWRITEENABLE,
+				D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN |
+				D3DCOLORWRITEENABLE_BLUE | D3DCOLORWRITEENABLE_ALPHA);
+			dev->SetTextureStageState(0, D3DTSS_COLOROP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAOP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+			dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+			dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSU,  D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSV,  D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+			dev->SetTexture(0, g_flip_tex);
+			dev->SetVertexDeclaration(nullptr);
+			dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+			{
+				const float W = (float)g_flip_w;
+				const float H = (float)g_flip_h;
+				struct V { float x, y, z, rhw, u, v; };
+				V quad[4] = {
+					{ -0.5f,    -0.5f,   0.0f, 1.0f, 1.0f, 0.0f },
+					{  W-0.5f,  -0.5f,   0.0f, 1.0f, 0.0f, 0.0f },
+					{ -0.5f,     H-0.5f, 0.0f, 1.0f, 1.0f, 1.0f },
+					{  W-0.5f,   H-0.5f, 0.0f, 1.0f, 0.0f, 1.0f },
+				};
+				dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(V));
+			}
+			ok = true;
+
+		cleanup:
+			if (prev_color) { dev->SetRenderTarget(0, prev_color); prev_color->Release(); }
+			if (prev_depth) { dev->SetDepthStencilSurface(prev_depth); prev_depth->Release(); }
+			else            { dev->SetDepthStencilSurface(nullptr); }
+			if (sb) { sb->Apply(); sb->Release(); }
+			if (bb) bb->Release();
+			return ok;
+		}
+
+	} // anonymous namespace
+
+	// ---- public entry points ---------------------------------------------
 	void on_present(IDirect3DDevice9* /*dev*/)
 	{
-		if (g_init_done) return;
-		g_init_done = true;
-
-		// First Present means the engine is fully up — Dvar_RegisterInt at
-		// 0x56C600 is safe to call. Wrap in __try so a bad address doesn't
-		// kill the game on Phase 2a verification.
-		__try
+		if (!g_init_done)
 		{
-			register_all();
+			g_init_done = true;
+			__try { register_all(); }
+			__except (EXCEPTION_EXECUTE_HANDLER)
+			{
+				debug_log("[cod4mirror] dvar registration crashed (address mismatch?)\n");
+			}
 		}
-		__except (EXCEPTION_EXECUTE_HANDLER)
+		// Frame-boundary safety: any RTT state should already be torn down
+		// at EndScene; if not, drop it so the next frame starts clean.
+		g_pass_active             = false;
+		g_in_segment              = false;
+		g_pending_early_composite = false;
+		g_pending_fullmirror_flip = false;
+	}
+
+	void on_set_vertex_shader_constant_f(IDirect3DDevice9* dev, UINT start,
+		const float* data, UINT count)
+	{
+		if (!data || start != 0 || count != 4) return;
+		const int rtt_on = engine::read_dvar_int(d_rtt);
+		if (!rtt_on) return;
+
+		const float c23 = data[11]; // c2[3]
+		const bool is_dhp = (c23 < -0.02f && c23 > -0.50f);
+		if (is_dhp)
 		{
-			debug_log("[cod4mirror] dvar registration crashed — address mismatch?\n");
+			begin_segment(dev);
+		}
+		else if (g_in_segment)
+		{
+			// any non-dhp 4-row matrix while a gun segment is bound = transition
+			// out of viewmodel pass (world / 2D HUD setup). Restore engine RT.
+			end_segment(dev);
 		}
 	}
 
-	// Phase 2a stubs — real implementations land in Phase 3.
-	void on_set_vertex_shader_constant_f(IDirect3DDevice9*, UINT, const float*, UINT) {}
-	void on_set_pixel_shader_constant_f (IDirect3DDevice9*, UINT, const float*, UINT) {}
-	void on_after_draw                  (IDirect3DDevice9*) {}
-	void on_end_scene                   (IDirect3DDevice9*) {}
+	void on_set_pixel_shader_constant_f(IDirect3DDevice9* dev, UINT start,
+		const float* data, UINT count)
+	{
+		if (!data || start != 7 || count < 1) return;
+
+		// PSCF c7 tonemap fingerprint: c70=c71=c72 in [-0.2, 0), c73 in (1, 5).
+		const float c70 = data[0], c71 = data[1], c72 = data[2], c73 = data[3];
+		auto eq = [](float a, float b){ float d = a - b; if (d < 0) d = -d; return d < 1e-4f; };
+		const bool is_pre_hud = (c70 < 0.0f && c70 > -0.2f && eq(c70, c71) && eq(c70, c72)
+			&& c73 > 1.0f && c73 < 5.0f);
+		if (!is_pre_hud) return;
+
+		const int rtt_on    = engine::read_dvar_int(d_rtt);
+		const int early     = engine::read_dvar_int(d_early_composite);
+		const int tonemap   = engine::read_dvar_int(d_tonemap_inject);
+		const int full_mirr = engine::read_dvar_int(d_full_mirror);
+
+		if (rtt_on && early != 0 && (g_pass_active || g_in_segment))
+		{
+			if (tonemap)
+			{
+				if (!inject_into_tonemap_source(dev))
+				{
+					if (g_in_segment) end_segment(dev);
+					g_pending_early_composite = true;
+				}
+			}
+			else
+			{
+				if (g_in_segment) end_segment(dev);
+				g_pending_early_composite = true;
+			}
+		}
+
+		if (full_mirr == 1) g_pending_fullmirror_flip = true;
+	}
+
+	void on_after_draw(IDirect3DDevice9* dev)
+	{
+		if (g_pending_early_composite)
+		{
+			g_pending_early_composite = false;
+			if (g_pass_active || g_in_segment)
+			{
+				if (g_in_segment) end_segment(dev);
+				final_composite(dev);
+			}
+		}
+		if (g_pending_fullmirror_flip)
+		{
+			g_pending_fullmirror_flip = false;
+			do_fullscreen_flip(dev);
+		}
+	}
+
+	void on_device_reset()
+	{
+		if (g_saved_color) { g_saved_color->Release(); g_saved_color = nullptr; }
+		if (g_saved_depth) { g_saved_depth->Release(); g_saved_depth = nullptr; }
+		g_pass_active             = false;
+		g_in_segment              = false;
+		g_pending_early_composite = false;
+		g_pending_fullmirror_flip = false;
+		release_targets();
+		release_flip_target();
+	}
+
+	void on_end_scene(IDirect3DDevice9* dev)
+	{
+		// Safety-net composite: if neither tonemap-inject nor early-composite
+		// fired this frame, blit the off-screen onto the BB now so the gun
+		// is at least visible (even if it covers the HUD).
+		if (g_pass_active || g_in_segment)
+		{
+			final_composite(dev);
+		}
+		// r_fullMirror == 2: brute-force flip everything (incl. HUD).
+		const int full_mirr = engine::read_dvar_int(d_full_mirror);
+		if (full_mirr == 2) do_fullscreen_flip(dev);
+	}
 }

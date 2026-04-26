@@ -68,6 +68,9 @@ namespace cod4mirror
 
 	HRESULT __stdcall D3D9Device::Reset(D3DPRESENT_PARAMETERS* pPresentationParameters)
 	{
+		// Release POOL_DEFAULT mirror resources before the engine resets
+		// the device (resolution change / fullscreen toggle).
+		mirror::on_device_reset();
 		return m_orig->Reset(pPresentationParameters);
 	}
 

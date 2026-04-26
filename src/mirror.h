@@ -19,4 +19,9 @@ namespace cod4mirror::mirror
 	void on_set_pixel_shader_constant_f (IDirect3DDevice9* dev, UINT start, const float* data, UINT count);
 	void on_after_draw                  (IDirect3DDevice9* dev);
 	void on_end_scene                   (IDirect3DDevice9* dev);
+
+	// Called from D3D9Device::Reset BEFORE the underlying Reset. Must release
+	// every POOL_DEFAULT resource we hold (off-screen RT textures, depth
+	// stencil, flip texture) or Reset will fail with D3DERR_DEVICELOST.
+	void on_device_reset();
 }
