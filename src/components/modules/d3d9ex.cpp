@@ -1358,8 +1358,17 @@ namespace components
 				(c32 > -eps && c32 < eps) &&
 				(c33 > 1.0f - 1e-3f && c33 < 1.0f + 1e-3f);
 		}
+		// v34.4: HUD-signature 2D-ortho also appears once BEFORE the world
+		// renders (engine setup pass with identical c0/c1/c2/c3 fingerprint).
+		// Gate flip on mirror_rtt::g_pass_active = true  (= the gun has been
+		// seen this frame). The gun renders BEFORE the HUD; the HUD renders
+		// AFTER the gun. The pre-world setup pass at frame start happens
+		// before the gun and so has g_pass_active=false at that moment, and
+		// is correctly NOT flipped. Requires r_mirrorViewmodel_rtt=1 for
+		// mirror_rtt::g_pass_active to be tracked - which is always true
+		// for the intended r_hudMirror use case (combine with Flip.fx).
 		float local_mtx_hud[16];
-		if (hud_mirror == 1 && is_hud_ortho)
+		if (hud_mirror == 1 && is_hud_ortho && mirror_rtt::g_pass_active)
 		{
 			for (int i = 0; i < 16; ++i) local_mtx_hud[i] = out_data[i];
 			local_mtx_hud[0]  = -local_mtx_hud[0];
