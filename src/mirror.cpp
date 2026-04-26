@@ -46,6 +46,7 @@ namespace cod4mirror::mirror
 		engine::dvar_s* d_mirror_fx_axis_idx  = nullptr;
 		engine::dvar_s* d_mirror_fx_log       = nullptr;
 		engine::dvar_s* d_depth_fix           = nullptr;
+		engine::dvar_s* d_clear_rtt_depth     = nullptr;
 
 		bool g_init_done = false;
 
@@ -145,6 +146,13 @@ namespace cod4mirror::mirror
 				"keeps right-side gun depth so MXAO sees a continuous occluder); "
 				"3=both passes with z=0.9999.",
 				2, 0, 3);
+			d_clear_rtt_depth  = Dvar_RegisterInt("r_mirrorViewmodel_clearRttDepth",
+				"cod4mirror: clear our RTT depth-stencil to far at end of frame. "
+				"ReShade's Generic Depth addon (used by MXAO) auto-picks one DSV "
+				"per frame; if it picks our RTT depth (which holds the original "
+				"non-mirrored gun) MXAO draws an AO silhouette on the right side. "
+				"Clearing to z=1.0 makes that pick a no-op.",
+				1, 0, 1);
 
 			log::line("[register] dvar handles: rtt=%p tonemap=%p early=%p "
 				"srgb=%p blend=%p full=%p fx=%p fxAxis=%p fxDist=%p",
@@ -997,6 +1005,36 @@ namespace cod4mirror::mirror
 			if ((s_log_throttle++ % 120) == 0)
 				log::line("[end_scene] full_mirror=2 -> do_fullscreen_flip");
 			do_fullscreen_flip(dev);
+		}
+
+		// End-of-frame clear of our RTT depth-stencil. ReShade's Generic
+		// Depth addon (auto-picked by MXAO) scans CreateDepthStencilSurface
+		// objects and selects one per frame to feed depth-using effects.
+		// Our g_depth holds the ORIGINAL non-mirrored gun's depth (we
+		// mirror only via UV-flip at composite time, not in the depth
+		// surface). If ReShade picks g_depth instead of the engine's
+		// main DSV, MXAO traces an AO silhouette of a phantom right-side
+		// gun even though the visible gun is mirrored to the left.
+		// Clearing g_depth to z=1.0 here means even when ReShade picks
+		// it post-frame, MXAO sees an empty far-plane buffer and draws
+		// nothing.
+		if (g_depth && engine::read_dvar_int(d_clear_rtt_depth) != 0)
+		{
+			IDirect3DSurface9* prev_depth = nullptr;
+			IDirect3DSurface9* prev_color = nullptr;
+			dev->GetRenderTarget(0, &prev_color);
+			dev->GetDepthStencilSurface(&prev_depth);
+			// Clear() needs SOME render-target bound. g_color matches
+			// g_depth's resolution and is already a render-target, so
+			// it's the safest choice. We use COLOR=0 to limit the clear
+			// to depth/stencil only.
+			if (g_color) dev->SetRenderTarget(0, g_color);
+			dev->SetDepthStencilSurface(g_depth);
+			dev->Clear(0, nullptr, D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL,
+				0, 1.0f, 0);
+			if (prev_color) { dev->SetRenderTarget(0, prev_color); prev_color->Release(); }
+			if (prev_depth) { dev->SetDepthStencilSurface(prev_depth); prev_depth->Release(); }
+			else            { dev->SetDepthStencilSurface(nullptr); }
 		}
 
 		// Frame-boundary state reset (mirrors what Present used to do).
