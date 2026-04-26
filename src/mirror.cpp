@@ -135,9 +135,11 @@ namespace cod4mirror::mirror
 				"cod4mirror: log up to N tag-mirror reflections. Decrements on each "
 				"hit; set to a positive int to dump a one-shot trace.", 0, 0, 1024);
 			d_depth_fix        = Dvar_RegisterInt("r_mirrorViewmodel_depthFix",
-				"cod4mirror: rewrite main depth at gun pixels so post-process AO "
-				"(e.g. ReShade MXAO) sees the mirrored gun, not the wall behind. "
-				"0=off, 1=on (default).", 1, 0, 1);
+				"cod4mirror: rewrite main depth at gun pixels for post-process AO "
+				"(e.g. ReShade MXAO). 0=off, 1=both passes (default: clear right "
+				"ghost + stamp left near), 2=pass 2 only (left near, skip right), "
+				"3=both with z=0.9999 instead of 1.0 (in case driver clips far).",
+				1, 0, 3);
 
 			log::line("[register] dvar handles: rtt=%p tonemap=%p early=%p "
 				"srgb=%p blend=%p full=%p fx=%p fxAxis=%p fxDist=%p",
@@ -266,9 +268,19 @@ namespace cod4mirror::mirror
 		//
 		// Caller invariants: engine main render-target + main depth-stencil
 		// MUST be bound. We don't touch the render target — only depth.
-		void apply_main_depth_fix(IDirect3DDevice9* dev)
+		//
+		// mode argument matches r_mirrorViewmodel_depthFix:
+		//   1 = both passes, z=1.0 for pass 1
+		//   2 = pass 2 only (skip right-ghost clear)
+		//   3 = both passes, z=0.9999 for pass 1 (in case driver clips
+		//       at exactly the far plane on D3DCMP_ALWAYS writes)
+		void apply_main_depth_fix(IDirect3DDevice9* dev, int mode)
 		{
+			if (mode <= 0) return;
 			if (!g_pass_active || !g_tex || g_w <= 0 || g_h <= 0) return;
+			const float far_z  = (mode == 3) ? 0.9999f : 1.0f;
+			const bool  do_p1  = (mode == 1 || mode == 3);
+			const bool  do_p2  = (mode == 1 || mode == 2 || mode == 3);
 
 			IDirect3DStateBlock9* sb = nullptr;
 			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
@@ -309,26 +321,32 @@ namespace cod4mirror::mirror
 			struct V { float x, y, z, rhw, u, v; };
 
 			// Pass 1: clear original-gun ghost on the right side. UV not
-			// flipped, z=1.0 — every pixel the engine drew gun-alpha into
+			// flipped, z=far — every pixel the engine drew gun-alpha into
 			// gets its main depth pushed to far so AO ignores it.
-			V pass1[4] = {
-				{ -0.5f,    -0.5f,    1.0f, 1.0f, 0.0f, 0.0f },
-				{  W-0.5f,  -0.5f,    1.0f, 1.0f, 1.0f, 0.0f },
-				{ -0.5f,     H-0.5f,  1.0f, 1.0f, 0.0f, 1.0f },
-				{  W-0.5f,   H-0.5f,  1.0f, 1.0f, 1.0f, 1.0f },
-			};
-			dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, pass1, sizeof(V));
+			if (do_p1)
+			{
+				V pass1[4] = {
+					{ -0.5f,    -0.5f,    far_z, 1.0f, 0.0f, 0.0f },
+					{  W-0.5f,  -0.5f,    far_z, 1.0f, 1.0f, 0.0f },
+					{ -0.5f,     H-0.5f,  far_z, 1.0f, 0.0f, 1.0f },
+					{  W-0.5f,   H-0.5f,  far_z, 1.0f, 1.0f, 1.0f },
+				};
+				dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, pass1, sizeof(V));
+			}
 
 			// Pass 2: stamp near depth on the mirrored side. UV flipped (u
 			// inverted), z=0.0 — main depth at the visible mirror gun gets
 			// near-plane depth so MXAO treats it as a foreground object.
-			V pass2[4] = {
-				{ -0.5f,    -0.5f,    0.0f, 1.0f, 1.0f, 0.0f },
-				{  W-0.5f,  -0.5f,    0.0f, 1.0f, 0.0f, 0.0f },
-				{ -0.5f,     H-0.5f,  0.0f, 1.0f, 1.0f, 1.0f },
-				{  W-0.5f,   H-0.5f,  0.0f, 1.0f, 0.0f, 1.0f },
-			};
-			dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, pass2, sizeof(V));
+			if (do_p2)
+			{
+				V pass2[4] = {
+					{ -0.5f,    -0.5f,    0.0f, 1.0f, 1.0f, 0.0f },
+					{  W-0.5f,  -0.5f,    0.0f, 1.0f, 0.0f, 0.0f },
+					{ -0.5f,     H-0.5f,  0.0f, 1.0f, 1.0f, 1.0f },
+					{  W-0.5f,   H-0.5f,  0.0f, 1.0f, 0.0f, 1.0f },
+				};
+				dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, pass2, sizeof(V));
+			}
 
 			if (sb) { sb->Apply(); sb->Release(); }
 		}
@@ -744,12 +762,13 @@ namespace cod4mirror::mirror
 			// main color + main depth-stencil are still bound, which is
 			// exactly what apply_main_depth_fix needs (it only writes
 			// depth, COLORWRITEENABLE=0). Skip cheaply if user disabled it.
-			if (engine::read_dvar_int(d_depth_fix))
+			const int dfix_mode = engine::read_dvar_int(d_depth_fix);
+			if (dfix_mode > 0)
 			{
 				if (g_in_segment) end_segment(dev);
 				static unsigned s_dfx = 0;
-				if (s_dfx++ < 4) log::line("[pscf] -> apply_main_depth_fix");
-				apply_main_depth_fix(dev);
+				if (s_dfx++ < 4) log::line("[pscf] -> apply_main_depth_fix mode=%d", dfix_mode);
+				apply_main_depth_fix(dev, dfix_mode);
 			}
 
 			if (tonemap)
