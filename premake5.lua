@@ -34,8 +34,9 @@ project "cod4mirror"
 	links { "d3d9" }
 
 	-- force .def-file exports so __stdcall names stay undecorated and match
-	-- the real d3d9.dll's export table.
-	linkoptions { "/DEF:\"%{prj.location}../src/d3d9.def\"" }
+	-- the real d3d9.dll's export table. Path is relative to the generated
+	-- vcxproj which lives in build/ so we step up once into src/.
+	linkoptions { "/DEF:\"..\\src\\d3d9.def\"" }
 
 	-- modern premake5 (5.0.0-beta7+) replaces flags{...} with dedicated APIs
 	multiprocessorcompile "On"
