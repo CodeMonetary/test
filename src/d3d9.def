@@ -1,19 +1,25 @@
 ; cod4mirror — proxy d3d9.dll exports.
-; Required because __stdcall on x86 mangles names ("_Direct3DCreate9@4");
-; this .def forces clean export names matching the real d3d9.dll so iw3mp.exe
-; can resolve them.
+;
+; Each public name (Direct3DCreate9, D3DPERF_*, ...) is aliased to our
+; internal C++ symbol (proxy_Name). Using internal names sidesteps the
+; C2375 conflict that would happen if we tried __declspec(dllexport) on
+; the same symbol that <d3d9.h> already declared with __declspec(dllimport).
+;
+; The internal symbols are __stdcall (WINAPI), so on x86 MSVC mangles them
+; to "_proxy_Name@N". We use the @N decorated form here so the linker can
+; find them.
 LIBRARY "d3d9"
 EXPORTS
-	Direct3DCreate9
-	Direct3DCreate9Ex
-	Direct3DShaderValidatorCreate9
-	D3DPERF_BeginEvent
-	D3DPERF_EndEvent
-	D3DPERF_GetStatus
-	D3DPERF_QueryRepeatFrame
-	D3DPERF_SetMarker
-	D3DPERF_SetOptions
-	D3DPERF_SetRegion
-	DebugSetLevel
-	DebugSetMute
-	Direct3D9EnableMaximizedWindowedModeShim
+	Direct3DCreate9                            = _proxy_Direct3DCreate9@4
+	Direct3DCreate9Ex                          = _proxy_Direct3DCreate9Ex@8
+	Direct3DShaderValidatorCreate9             = _proxy_Direct3DShaderValidatorCreate9@0
+	D3DPERF_BeginEvent                         = _proxy_D3DPERF_BeginEvent@8
+	D3DPERF_EndEvent                           = _proxy_D3DPERF_EndEvent@0
+	D3DPERF_GetStatus                          = _proxy_D3DPERF_GetStatus@0
+	D3DPERF_QueryRepeatFrame                   = _proxy_D3DPERF_QueryRepeatFrame@0
+	D3DPERF_SetMarker                          = _proxy_D3DPERF_SetMarker@8
+	D3DPERF_SetOptions                         = _proxy_D3DPERF_SetOptions@4
+	D3DPERF_SetRegion                          = _proxy_D3DPERF_SetRegion@8
+	DebugSetLevel                              = _proxy_DebugSetLevel@4
+	DebugSetMute                               = _proxy_DebugSetMute@0
+	Direct3D9EnableMaximizedWindowedModeShim   = _proxy_Direct3D9EnableMaximizedWindowedModeShim@4
