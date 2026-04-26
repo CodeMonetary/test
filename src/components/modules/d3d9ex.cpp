@@ -108,6 +108,100 @@ namespace components
 			else                 dev->SetDepthStencilSurface(nullptr);
 		}
 
+		// v33 (ported from cod4mirror): rewrite main depth-stencil at the
+		// gun pixels so post-process AO (ReShade MXAO/SSAO) does NOT bleed
+		// wall shadows through the mirrored gun. Called between end_segment
+		// (engine main RT+DSV are still bound) and inject_into_tonemap_source.
+		// We sample our off-screen RT color (g_tex), use its alpha as a mask,
+		// ZWRITE only.
+		//
+		//   Pass 1 (right side, original gun shape):
+		//     UV not flipped, z=far. Stamps the leaked engine z-prefill of
+		//     the original right-side gun out to the far plane.
+		//
+		//   Pass 2 (left side, mirrored gun):
+		//     UV horizontally flipped, z=0.0 (near). Tells AO that the
+		//     visible mirrored gun is a near-occluder.
+		//
+		// In practice pass 1 alone caused MXAO to draw a silhouette outline
+		// at the right-side z-discontinuity, so default mode is 2
+		// (pass 2 only). r_mirrorViewmodel_depthFix dvar selects:
+		//   0 = off
+		//   1 = pass 1 + pass 2 with z=1.0 (legacy ghost-creator)
+		//   2 = pass 2 only (default; no right-side touch)
+		//   3 = pass 1 + pass 2 with z=0.9999 (in case driver clips at 1.0)
+		static void apply_main_depth_fix(IDirect3DDevice9* dev, int mode)
+		{
+			if (mode <= 0) return;
+			if (!g_pass_active || !g_tex || g_w <= 0 || g_h <= 0) return;
+			const float far_z = (mode == 3) ? 0.9999f : 1.0f;
+			const bool  do_p1 = (mode == 1 || mode == 3);
+			const bool  do_p2 = (mode == 1 || mode == 2 || mode == 3);
+
+			IDirect3DStateBlock9* sb = nullptr;
+			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
+
+			dev->SetVertexShader(nullptr);
+			dev->SetPixelShader(nullptr);
+			dev->SetRenderState(D3DRS_ZENABLE,           TRUE);
+			dev->SetRenderState(D3DRS_ZWRITEENABLE,      TRUE);
+			dev->SetRenderState(D3DRS_ZFUNC,             D3DCMP_ALWAYS);
+			dev->SetRenderState(D3DRS_CULLMODE,          D3DCULL_NONE);
+			dev->SetRenderState(D3DRS_LIGHTING,          FALSE);
+			dev->SetRenderState(D3DRS_FOGENABLE,         FALSE);
+			dev->SetRenderState(D3DRS_ALPHABLENDENABLE,  FALSE);
+			dev->SetRenderState(D3DRS_ALPHATESTENABLE,   TRUE);
+			dev->SetRenderState(D3DRS_ALPHAFUNC,         D3DCMP_GREATER);
+			dev->SetRenderState(D3DRS_ALPHAREF,          0x10);
+			dev->SetRenderState(D3DRS_STENCILENABLE,     FALSE);
+			dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,   FALSE);
+			// disable color writes - we ONLY want depth to be written
+			dev->SetRenderState(D3DRS_COLORWRITEENABLE,  0);
+
+			dev->SetTextureStageState(0, D3DTSS_COLOROP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAOP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+			dev->SetSamplerState(0, D3DSAMP_MINFILTER,   D3DTEXF_POINT);
+			dev->SetSamplerState(0, D3DSAMP_MAGFILTER,   D3DTEXF_POINT);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSU,    D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSV,    D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+			dev->SetTexture(0, g_tex);
+			dev->SetVertexDeclaration(nullptr);
+			dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+
+			const float W = (float)g_w;
+			const float H = (float)g_h;
+			struct V { float x, y, z, rhw, u, v; };
+
+			if (do_p1)
+			{
+				V pass1[4] = {
+					{ -0.5f,    -0.5f,    far_z, 1.0f, 0.0f, 0.0f },
+					{  W-0.5f,  -0.5f,    far_z, 1.0f, 1.0f, 0.0f },
+					{ -0.5f,     H-0.5f,  far_z, 1.0f, 0.0f, 1.0f },
+					{  W-0.5f,   H-0.5f,  far_z, 1.0f, 1.0f, 1.0f },
+				};
+				dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, pass1, sizeof(V));
+			}
+
+			if (do_p2)
+			{
+				V pass2[4] = {
+					{ -0.5f,    -0.5f,    0.0f, 1.0f, 1.0f, 0.0f },
+					{  W-0.5f,  -0.5f,    0.0f, 1.0f, 0.0f, 0.0f },
+					{ -0.5f,     H-0.5f,  0.0f, 1.0f, 1.0f, 1.0f },
+					{  W-0.5f,   H-0.5f,  0.0f, 1.0f, 0.0f, 1.0f },
+				};
+				dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, pass2, sizeof(V));
+			}
+
+			if (sb) { sb->Apply(); sb->Release(); }
+		}
+
+
 		static bool inject_into_tonemap_source(IDirect3DDevice9* dev)
 		{
 			if (g_in_segment) end_segment(dev);
@@ -758,6 +852,34 @@ namespace components
 			const int full_mirror_eos = dvars::r_fullMirror
 				? dvars::r_fullMirror->current.integer : 0;
 			if (full_mirror_eos == 2) mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
+		}
+
+		// v33 (ported from cod4mirror): clear our off-screen RTT
+		// depth-stencil to far at end of every frame. ReShade's
+		// Generic Depth addon scans D3D9 CreateDepthStencilSurface
+		// objects and may auto-pick our RTT g_depth instead of the
+		// engine main DSV; that buffer holds the original right-side
+		// (non-mirrored) gun and would produce a phantom MXAO
+		// silhouette on the floor when the camera tilts down.
+		// Clearing here makes the pick produce no AO.
+		if (mirror_rtt::g_depth
+			&& dvars::r_mirrorViewmodel_clearRttDepth
+			&& dvars::r_mirrorViewmodel_clearRttDepth->current.integer != 0)
+		{
+			IDirect3DSurface9* prev_color = nullptr;
+			IDirect3DSurface9* prev_depth = nullptr;
+			m_pIDirect3DDevice9->GetRenderTarget(0, &prev_color);
+			m_pIDirect3DDevice9->GetDepthStencilSurface(&prev_depth);
+			// Clear() needs SOME render-target bound. g_color matches
+			// g_depth's resolution and is already a render-target,
+			// COLORWRITE=0 limits the clear to depth/stencil only.
+			if (mirror_rtt::g_color) m_pIDirect3DDevice9->SetRenderTarget(0, mirror_rtt::g_color);
+			m_pIDirect3DDevice9->SetDepthStencilSurface(mirror_rtt::g_depth);
+			m_pIDirect3DDevice9->Clear(0, nullptr, D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL,
+				0, 1.0f, 0);
+			if (prev_color) { m_pIDirect3DDevice9->SetRenderTarget(0, prev_color); prev_color->Release(); }
+			if (prev_depth) { m_pIDirect3DDevice9->SetDepthStencilSurface(prev_depth); prev_depth->Release(); }
+			else            { m_pIDirect3DDevice9->SetDepthStencilSurface(nullptr); }
 		}
 
 		return m_pIDirect3DDevice9->EndScene();
@@ -1420,6 +1542,19 @@ namespace components
 				c73 > 1.0f && c73 < 5.0f;
 			if (is_pre_hud_signal)
 			{
+				// v33 (ported from cod4mirror): rewrite main depth at the
+				// gun pixels so post-process AO (ReShade MXAO/SSAO) does
+				// not bleed wall shadows through the mirrored gun. Engine
+				// main RT+DSV are still bound here, which is what the
+				// depth-fix pass needs (it only writes Z, COLORWRITE=0).
+				const int dfix_mode = dvars::r_mirrorViewmodel_depthFix
+					? dvars::r_mirrorViewmodel_depthFix->current.integer : 0;
+				if (dfix_mode > 0)
+				{
+					if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
+					mirror_rtt::apply_main_depth_fix(m_pIDirect3DDevice9, dfix_mode);
+				}
+
 				const int tonemap_inject = dvars::r_mirrorViewmodel_rttTonemapInject
 					? dvars::r_mirrorViewmodel_rttTonemapInject->current.integer : 1;
 				if (tonemap_inject && mirror_rtt::inject_into_tonemap_source(m_pIDirect3DDevice9))

@@ -2034,6 +2034,43 @@ namespace components
 			/* maxVal	*/ 2,
 			/* flags	*/ game::dvar_flags::saved);
 
+		// v33: ported from cod4mirror — fix MXAO/SSAO bleed-through on the
+		// mirrored gun. ReShade's MXAO samples the engine main depth-stencil
+		// to compute ambient occlusion. With r_mirrorViewmodel_rtt=1 the
+		// visible (mirrored) gun renders to our off-screen RT, NOT to main
+		// depth — so MXAO sees "no gun there" and traces wall shadows over
+		// the mirrored gun pixels. Pass 2 stamps near-z (z=0) onto main DSV
+		// at gun-shape pixels with horizontally-flipped UVs so MXAO sees an
+		// occluder where the mirrored gun visually is. Pass 1 (and pass 3
+		// = same with z=0.9999) was an attempted right-side-clear; in
+		// practice it created z-discontinuities that MXAO turned into a
+		// silhouette outline, so default mode is 2 (pass 2 only).
+		dvars::r_mirrorViewmodel_depthFix = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_depthFix",
+			/* desc		*/ "v33: rewrite main depth at gun pixels to fix post-process AO bleed-through (e.g. ReShade MXAO showing wall shadows through the mirrored gun). 0 = off. 1 = both passes (z=1.0 right-far + z=0.0 left-near) — leaves a depth discontinuity that MXAO turns into a silhouette ghost. 2 = pass 2 only (default; left-near stamp on the mirrored gun, no right-side touch — fixes bleed-through cleanly). 3 = both passes with z=0.9999 (in case driver clips at exactly the far plane). Use 0 if you don't run depth-reading post-fx.",
+			/* default	*/ 2,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 3,
+			/* flags	*/ game::dvar_flags::saved);
+
+		// v33: ported from cod4mirror — fix MXAO right-side gun ghost when
+		// camera looks down. ReShade's Generic Depth addon scans D3D9
+		// depth surfaces created via CreateDepthStencilSurface and picks
+		// one per frame to feed depth-reading effects. Our RTT depth
+		// (mirror_rtt::g_depth) holds the ORIGINAL non-mirrored gun (we
+		// mirror only via UV-flip at composite time, not in depth). When
+		// ReShade picks our RTT depth instead of the engine's main DSV,
+		// MXAO traces an AO silhouette at the original right-side gun
+		// position. Clearing g_depth to z=1.0 at end of every frame
+		// makes that pick produce no AO. Cost: one Clear() per frame.
+		dvars::r_mirrorViewmodel_clearRttDepth = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_clearRttDepth",
+			/* desc		*/ "v33: clear our off-screen RTT depth-stencil to far at end of every frame. ReShade's Generic Depth addon may auto-select our RTT depth as the input for MXAO/SSAO; that buffer holds the ORIGINAL right-side gun and would produce a phantom AO silhouette at the unmirrored gun position. Clearing makes ReShade's pick a no-op. 0 = off (legacy). 1 = on (default).",
+			/* default	*/ 1,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 1,
+			/* flags	*/ game::dvar_flags::saved);
+
 		// Install the FX mirror detour. Safe even when r_mirrorViewmodel_mirrorFx
 		// is 0 because the pre-hook bails immediately in that case.
 		fx_mirror::install();
