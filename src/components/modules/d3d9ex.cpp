@@ -1350,6 +1350,46 @@ namespace components
 			}
 		}
 
+		// v34: r_fullMirror==3 = true-mirror via projection-matrix X-flip
+		// applied at the VSCF c0-c3 upload point. The set_gunfov hook fires
+		// only for the viewmodel view-parms (it's installed at 0x5FAA05 for
+		// cg_fov_tweaks gun-fov separation), so world view-parms never reach
+		// a hook there. Instead we detect the world projection upload by its
+		// c2[3] signature (is_std_proj: c23 < -1.0) and flip column 0.
+		// is_depth_hack_proj is the viewmodel (RTT or method handles it).
+		// 2D-ortho HUD uploads have c2[3]>=0 so they bucket into neither and
+		// are correctly NOT flipped.
+		//
+		// Negation pattern: pConstantData[0,4,8,12] = first float of each of
+		// c0..c3 = row 0 of math matrix in column-major storage (D3D9 default
+		// for HLSL VS register layout). This negates clip.x output, mirroring
+		// the world horizontally. Matches the working flipAxis=4 default of
+		// r_mirrorViewmodel_flipAxis. Triangle winding inverts as a result so
+		// CULLMODE is swapped via mirror_world_active in SetRenderState.
+		const int full_mirror_mode = dvars::r_fullMirror
+			? dvars::r_fullMirror->current.integer : 0;
+		float local_mtx_v34[16];
+		bool world_flip_applied = false;
+		if (full_mirror_mode == 3 && is_std_proj)
+		{
+			for (int i = 0; i < 16; ++i) local_mtx_v34[i] = out_data[i];
+			local_mtx_v34[0]  = -local_mtx_v34[0];
+			local_mtx_v34[4]  = -local_mtx_v34[4];
+			local_mtx_v34[8]  = -local_mtx_v34[8];
+			local_mtx_v34[12] = -local_mtx_v34[12];
+			out_data = local_mtx_v34;
+			world_flip_applied = true;
+		}
+
+		// Track world phase for CULLMODE swap. Reset on every c0-c3 upload so
+		// HUD (2D ortho, neither std nor dhp) and viewmodel (dhp) get the
+		// correct (=non-mirrored) cull state. Re-set true on each std_proj
+		// upload while r_fullMirror==3 active.
+		if (is_mtx_at_zero)
+		{
+			_renderer::mirror_world_active = (full_mirror_mode == 3 && is_std_proj);
+		}
+
 		if (apply_flip)
 		{
 			for (int i = 0; i < 16; ++i) local_mtx[i] = pConstantData[i];

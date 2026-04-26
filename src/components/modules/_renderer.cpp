@@ -1313,36 +1313,14 @@ namespace components
 		default: break;
 		}
 
-		// v34: r_fullMirror==3 = true-mirror via projection flip applied
-		// to the WORLD scene only (non-viewmodel). When viewmodel scene
-		// (is_viewmodel_dhnc=true), the existing rtt / method handles its
-		// own mirror so we skip - that keeps r_mirrorViewmodel_rtt=1
-		// orthogonal to r_fullMirror=3. Flipping projection during render
-		// makes the engine write a naturally-mirrored INTZ depth buffer,
-		// which is what ReShade's MXAO/SSAO reads - so post-FX coheres
-		// with the mirrored color, no MXAO ghost layer.
-		//
-		// Triangle winding inverts because of the X flip; CULLMODE swap
-		// is handled by D3D9Device::SetRenderState gated on
-		// _renderer::mirror_world_active.
-		const int full_mirror_mode = dvars::r_fullMirror
-			? dvars::r_fullMirror->current.integer : 0;
-		if (full_mirror_mode == 3 && !is_viewmodel_dhnc)
-		{
-			view_parms->projectionMatrix.m[0][0] = -view_parms->projectionMatrix.m[0][0];
-			view_parms->projectionMatrix.m[1][0] = -view_parms->projectionMatrix.m[1][0];
-			view_parms->projectionMatrix.m[2][0] = -view_parms->projectionMatrix.m[2][0];
-			view_parms->projectionMatrix.m[3][0] = -view_parms->projectionMatrix.m[3][0];
-			view_parms->viewProjectionMatrix.m[0][0] = -view_parms->viewProjectionMatrix.m[0][0];
-			view_parms->viewProjectionMatrix.m[1][0] = -view_parms->viewProjectionMatrix.m[1][0];
-			view_parms->viewProjectionMatrix.m[2][0] = -view_parms->viewProjectionMatrix.m[2][0];
-			view_parms->viewProjectionMatrix.m[3][0] = -view_parms->viewProjectionMatrix.m[3][0];
-			_renderer::mirror_world_active = true;
-		}
-		else
-		{
-			_renderer::mirror_world_active = false;
-		}
+		// v34: r_fullMirror==3 path is implemented at the VSCF level (see
+		// d3d9ex::SetVertexShaderConstantF) because this set_gunfov hook
+		// fires only for the viewmodel view-parms (it's installed at
+		// 0x5FAA05 specifically for cg_fov_tweaks gun-fov separation).
+		// World view-parms never reach this hook, so the projection flip
+		// has to happen as the matrix is uploaded to GPU constants. The
+		// VSCF intercept also drives _renderer::mirror_world_active for
+		// CULLMODE swap.
 
 		if (log_level >= 1 && method != 0 && gate)
 		{
