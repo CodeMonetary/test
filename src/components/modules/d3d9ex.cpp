@@ -316,7 +316,22 @@ namespace components
 			if (source_surface) { source_surface->Release(); source_surface = nullptr; }
 			if (source_tex) { source_tex->Release(); source_tex = nullptr; }
 			if (source_base) { source_base->Release(); source_base = nullptr; }
-			if (ok) g_pass_active = false;
+			if (ok)
+			{
+				g_pass_active = false;
+				// v35.6: latch "gun pass resolved this frame" in the inject
+				// path too. inject_into_tonemap_source is the default fast
+				// path for r_mirrorViewmodel_rttTonemapInject=1 (default);
+				// when it succeeds it sets g_pass_active=false directly so
+				// final_composite() returns early on the next call and the
+				// v35.5 latch was never set, leaving the HUD-RTT gate closed
+				// for the entire frame. Set it here so the gate opens at the
+				// real post-FX c7 (when g_pass_active was true at entry to
+				// inject) but stays closed for the early-c7 false trigger
+				// during damage flash (when g_pass_active was false at entry
+				// and inject returned ok=false at the !g_pass_active early-out).
+				g_final_composite_done_this_frame = true;
+			}
 			return ok;
 		}
 
