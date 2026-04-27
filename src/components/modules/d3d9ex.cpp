@@ -39,6 +39,15 @@ namespace components
 		static bool g_pass_active                = false; // first dhp seen this frame; cleared after final composite
 		static bool g_in_segment                 = false; // off-screen RT currently bound
 		static bool g_pending_early_composite    = false; // v22: set on PSCF c7 fingerprint, fires AFTER the next draw (the engine's final tonemap-output) instead of before it
+		// v35.5: latched per-frame the moment final_composite() actually
+		// runs (i.e. the gun-RTT pass is fully resolved onto the BB).
+		// Reset in BeginScene. Used as a GATE for mirror_hud::begin_capture:
+		// during damage-flash frames the engine emits a PSCF c7 fingerprint
+		// match BEFORE world+gun rendering, so the first ALPHATESTENABLE=TRUE
+		// (e.g. a transparency pass during world rendering) prematurely fires
+		// begin_capture without this gate, and the whole scene ends up
+		// captured into HUD-RTT (composite then mirrors world+gun+HUD).
+		static bool g_final_composite_done_this_frame = false;
 
 		// v32: full-screen mirror (`r_fullMirror`).
 		//   0 = off
@@ -316,6 +325,12 @@ namespace components
 			if (g_in_segment) end_segment(dev); // safety net (no stdp seen before EndScene)
 			if (!g_pass_active) return;
 			g_pass_active   = false;
+			// v35.5: latch that gun-RTT has been resolved onto the BB this frame.
+			// mirror_hud::begin_capture is gated on this flag (see SetRenderState
+			// ALPHATESTENABLE hook) so HUD-RTT capture cannot start until the gun
+			// pass is fully done. Prevents early-c7 false triggers during damage
+			// flash from putting world+gun into HUD-RTT.
+			g_final_composite_done_this_frame = true;
 
 			// v14: capture ALL device state in a state block. After the composite we
 			// Apply() the block which restores every render state, texture stage,
@@ -992,6 +1007,12 @@ namespace components
 		// so the world pass (first after BeginScene) renders with normal culling.
 		_renderer::mirror_viewmodel_active = false;
 
+		// v35.5: clear the per-frame "gun pass resolved" latch. Used as
+		// gate for HUD-RTT begin_capture so we never start capturing
+		// HUD draws until mirror_rtt::final_composite has actually run
+		// for this frame (or rtt is disabled, see ALPHATESTENABLE hook).
+		mirror_rtt::g_final_composite_done_this_frame = false;
+
 		if (_renderer::mirror_dump_active())
 		{
 			_renderer::mirror_dump_write("\n=== BEGIN frame %d (BeginScene) ===\n",
@@ -1193,30 +1214,36 @@ namespace components
 		// on. Firing begin_capture HERE rather than after the first draw
 		// post-PSCF c7 keeps post-FX out of HUD-RTT, so composite()
 		// only mirrors HUD pixels (world+gun stay on the back-buffer).
-		if (State == D3DRS_ALPHATESTENABLE && Value && mirror_hud::g_capture_armed && !mirror_hud::g_active)
+		//
+		// v35.5: ALPHATESTENABLE=TRUE alone is NOT sufficient. During
+		// damage-flash frames the engine emits a PSCF c7 fingerprint
+		// match BEFORE world+gun rendering completes. The first
+		// ALPHATESTENABLE=TRUE following that early fingerprint can be
+		// a transparency pass during world rendering (e.g. damage-overlay
+		// red gradient), and firing begin_capture there pulls the rest
+		// of the world+gun+post-FX into HUD-RTT - the composite then
+		// mirrors the entire scene instead of just the HUD (user-visible
+		// symptom: whole image flips horizontally for ~2 seconds during
+		// each grenade explosion, observed in v35.0..v35.4).
+		//
+		// Add a gate: only fire begin_capture when the gun-RTT pass has
+		// already been resolved this frame (mirror_rtt::final_composite
+		// has run, latching g_final_composite_done_this_frame). When
+		// r_mirrorViewmodel_rtt is disabled there is no gun pass to
+		// gate on, so treat the gate as always open in that case. This
+		// rejects all early-c7 false triggers during world rendering;
+		// the real post-FX c7 fingerprint fires AFTER the gun pass, so
+		// the gate has been opened by the time the real HUD pass begins.
+		const bool rtt_off = !dvars::r_mirrorViewmodel_rtt
+			|| dvars::r_mirrorViewmodel_rtt->current.integer == 0;
+		const bool gun_pass_resolved = rtt_off
+			|| mirror_rtt::g_final_composite_done_this_frame;
+		if (State == D3DRS_ALPHATESTENABLE && Value
+			&& mirror_hud::g_capture_armed && !mirror_hud::g_active
+			&& gun_pass_resolved)
 		{
 			mirror_hud::g_capture_armed = false;
 			++mirror_hud::g_alphatest_fires_this_frame;
-			// v35.4: ensure gun-RTT composite has fired BEFORE we redirect
-			// RT to HUD-RTT. Normally g_pending_early_composite is consumed
-			// by the next DrawPrimitive after PSCF c7 (post-FX tonemap-output
-			// quad), so the gun is composited to BB before any HUD-RTT
-			// activity. But during damage-flash overlays the engine can
-			// emit SetRenderState(ALPHATESTENABLE, TRUE) before that next
-			// DrawPrimitive: if begin_capture binds HUD-RTT first, the
-			// pending gun composite then lands on HUD-RTT instead of BB,
-			// and the HUD-RTT mirror composite flips it a second time so
-			// the gun appears un-mirrored on the back-buffer for the
-			// duration of the damage frame(s).
-			if (mirror_rtt::g_pending_early_composite)
-			{
-				mirror_rtt::g_pending_early_composite = false;
-				if (mirror_rtt::g_pass_active || mirror_rtt::g_in_segment)
-				{
-					if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
-					mirror_rtt::final_composite(m_pIDirect3DDevice9);
-				}
-			}
 			mirror_hud::begin_capture(m_pIDirect3DDevice9);
 		}
 		const DWORD original_value = Value;
