@@ -665,6 +665,11 @@ namespace components
 		// NOTE: EndScene owns the dump-frame counter. Some IW3 dispatch paths route
 		// Present() around this wrapper, so relying on it alone drops frame boundaries.
 		_renderer::mirror_viewmodel_active = false;
+		// v34.6: reset HUD-mirror frame-scoped gun-seen flag at the true frame
+		// boundary. Must NOT be reset in BeginScene/EndScene because iw3 calls
+		// those mid-frame (after gun, before HUD) and we need this flag to stay
+		// set across the EndScene/BeginScene pair so the HUD pass sees gun_seen=1.
+		_renderer::gun_seen_this_present = false;
 		return m_pIDirect3DDevice9->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
 	}
 
@@ -1279,6 +1284,9 @@ namespace components
 		if (is_depth_hack_proj)
 		{
 			_renderer::mirror_vscf_follow_remaining = flipFollow;
+			// v34.6: latch the gun-seen flag for the entire present-cycle.
+			// Used by r_hudMirror gate; reset only on Present.
+			_renderer::gun_seen_this_present = true;
 		}
 		else if (is_std_proj)
 		{
@@ -1368,7 +1376,7 @@ namespace components
 		// mirror_rtt::g_pass_active to be tracked - which is always true
 		// for the intended r_hudMirror use case (combine with Flip.fx).
 		float local_mtx_hud[16];
-		if (hud_mirror == 1 && is_hud_ortho && mirror_rtt::g_pass_active)
+		if (hud_mirror == 1 && is_hud_ortho && _renderer::gun_seen_this_present)
 		{
 			for (int i = 0; i < 16; ++i) local_mtx_hud[i] = out_data[i];
 			local_mtx_hud[0]  = -local_mtx_hud[0];
@@ -1458,7 +1466,7 @@ namespace components
 				StartRegister, Vector4fCount, (int)_renderer::mirror_viewmodel_active,
 				(out_data != pConstantData) ? 1 : 0,
 				(int)is_depth_hack_proj, (int)is_std_proj,
-				hud_mirror, (int)is_hud_ortho, (int)mirror_rtt::g_pass_active);
+				hud_mirror, (int)is_hud_ortho, (int)_renderer::gun_seen_this_present);
 			const UINT rows = (Vector4fCount > 16) ? 16 : Vector4fCount;
 			for (UINT i = 0; i < rows; ++i)
 			{

@@ -14,6 +14,16 @@ namespace components
 		// consumed by d3d9ex::SetRenderState to invert D3DRS_CULLMODE on viewmodel draws
 		static volatile bool mirror_viewmodel_active;
 
+		// v34.6: gun-seen-this-present-cycle flag, used to gate r_hudMirror.
+		// In iw3 the engine calls EndScene MID-frame (after world+gun+post-FX,
+		// before HUD) and then BeginScene again for the HUD pass. Our existing
+		// mirror_rtt::g_pass_active is reset by final_composite during EndScene
+		// so it goes false right before the HUD draws and the HUD flip never
+		// fires. This flag is only reset on Present (frame boundary) so it
+		// stays true across the mid-frame EndScene/BeginScene pair, allowing
+		// the HUD draws to see gun_seen=true and trigger the flip.
+		static volatile bool gun_seen_this_present;
+
 		// r_mirrorViewmodel v8: armed when a depth-hack proj VSCF is uploaded; decremented
 		// per non-dhp matrix VSCF; cleared on std-proj VSCF. Used by SetVertexShaderConstantF
 		// to also flip the lighting / per-mesh constants that follow the gun matrix.

@@ -6,6 +6,7 @@
 namespace components
 {
 	volatile bool _renderer::mirror_viewmodel_active = false;
+volatile bool _renderer::gun_seen_this_present = false;
 	volatile int  _renderer::mirror_vscf_follow_remaining = 0;
 	volatile int  _renderer::mirror_dump_frames_remaining = 0;
 	int           _renderer::mirror_dump_frame_counter   = 0;
