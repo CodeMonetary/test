@@ -48,21 +48,16 @@ namespace components
 		// begin_capture without this gate, and the whole scene ends up
 		// captured into HUD-RTT (composite then mirrors world+gun+HUD).
 		static bool g_final_composite_done_this_frame = false;
-		// v35.7: latched in begin_segment when the gun-RTT pass begins this
-		// frame. Reset in BeginScene. Used by mirror_hud::begin_capture
-		// trigger to know whether a gun pass actually started this frame:
-		//   - If gun_pass_started=false at HUD ALPHATESTENABLE=TRUE the
-		//     PSCF c7 arm came BEFORE any gun pass (early-c7 false trigger
-		//     during damage flash). Do not fire begin_capture - it would
-		//     pull world+gun+post-FX into HUD-RTT.
-		//   - If gun_pass_started=true at HUD ALPHATESTENABLE=TRUE the
-		//     gun pass has begun. If g_pass_active is still true (no
-		//     inject ran, no DrawPrimitive consume ran), force-call
-		//     final_composite to resolve the gun to the BB before
-		//     beginning HUD-RTT capture. This handles damage-flash
-		//     frames where there is no second post-FX c7 to drive the
-		//     normal inject-on-c7 path.
-		static bool g_gun_pass_started_this_frame   = false;
+		// v35.8: latched the first time a depth-hack projection (gun matrix)
+		// is uploaded this frame. Reset in BeginScene. Detected at SVP
+		// regardless of r_mirrorViewmodel_rtt - dhp matrix shape is the
+		// engine's own viewmodel-projection signal and fires whether or not
+		// the gun-RTT path is active. Used as a gate for mirror_hud's PSCF
+		// c7 arming: in damage-flash frames the engine emits an early c7
+		// match BEFORE the gun pass starts; gating arming on dhp_seen
+		// rejects that early-c7 (no fire), while still arming on a real
+		// post-FX c7 that fires AFTER the gun pass (HUD captures normally).
+		static bool g_dhp_seen_this_frame           = false;
 
 		// v32: full-screen mirror (`r_fullMirror`).
 		//   0 = off
@@ -116,9 +111,6 @@ namespace components
 				dev->Clear(0, nullptr, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL,
 					0x00000000, 1.0f, 0);
 				g_pass_active = true;
-				// v35.7: latch that a gun-RTT pass has started this frame.
-				// Used by mirror_hud HUD-RTT begin_capture gate.
-				g_gun_pass_started_this_frame = true;
 			}
 			g_in_segment = true;
 		}
@@ -1045,8 +1037,9 @@ namespace components
 		// HUD draws until mirror_rtt::final_composite has actually run
 		// for this frame (or rtt is disabled, see ALPHATESTENABLE hook).
 		mirror_rtt::g_final_composite_done_this_frame = false;
-		// v35.7: clear the per-frame "gun pass started" latch.
-		mirror_rtt::g_gun_pass_started_this_frame = false;
+		// v35.8: clear the per-frame "dhp seen" latch. Set at SVP when
+		// the engine first uploads a depth-hack-projection (gun) matrix.
+		mirror_rtt::g_dhp_seen_this_frame = false;
 
 		if (_renderer::mirror_dump_active())
 		{
@@ -1269,66 +1262,20 @@ namespace components
 		// rejects all early-c7 false triggers during world rendering;
 		// the real post-FX c7 fingerprint fires AFTER the gun pass, so
 		// the gate has been opened by the time the real HUD pass begins.
-		// v35.7 gate. Two cases must be distinguished by the time we
-		// see ALPHATESTENABLE=TRUE with g_capture_armed=true:
-		//
-		//   case A) gun pass has not started this frame yet
-		//          (g_gun_pass_started_this_frame=false). The c7 fingerprint
-		//          that armed us is the early/false damage-flash trigger,
-		//          and this ALPHATESTENABLE is a transparency pass during
-		//          world rendering (e.g. red damage gradient). Firing
-		//          begin_capture here would pull world+gun+post-FX into
-		//          HUD-RTT. Do NOT fire; stay armed (a later legitimate
-		//          c7 may also re-arm, but we still gate on case B).
-		//
-		//   case B) gun pass started this frame but is currently inside
-		//          a segment (g_in_segment=true). Wait until the engine
-		//          ends the segment before considering capture.
-		//
-		//   case C) gun pass started and is NOT inside a segment. Either
-		//          inject_into_tonemap_source already ran for the real
-		//          post-FX c7 (g_pass_active=false, latch already true),
-		//          or no second c7 fired (damage flash variant) and the
-		//          gun pass is sitting unresolved (g_pass_active=true).
-		//          In the unresolved sub-case force-call final_composite
-		//          right here so the gun is blitted to the BB BEFORE we
-		//          redirect the RT to HUD-RTT (otherwise the EndScene
-		//          final_composite would land on HUD-RTT, then the
-		//          HUD-RTT mirror composite would flip the gun a second
-		//          time and the gun would appear un-mirrored on the
-		//          back buffer for the duration of the damage frame).
-		//
-		//   rtt_off: no mirror_rtt path is active. Fire freely on first
-		//          ALPHATESTENABLE=TRUE after the c7 arm.
-		const bool rtt_off = !dvars::r_mirrorViewmodel_rtt
-			|| dvars::r_mirrorViewmodel_rtt->current.integer == 0;
+		// v35.8 firing gate. Arming has already been gated on
+		// mirror_rtt::g_dhp_seen_this_frame at the PSCF c7 detection site,
+		// so by the time g_capture_armed=true here the c7 fingerprint
+		// fired AFTER at least one dhp upload (i.e. AFTER the gun pass
+		// began). This rules out the early/false damage-flash c7 entirely.
+		// On the firing side just fire on the next ALPHATESTENABLE=TRUE,
+		// which by construction is the start of the real HUD pass
+		// (post-FX quads in iw3 run with alpha-test disabled).
 		if (State == D3DRS_ALPHATESTENABLE && Value
 			&& mirror_hud::g_capture_armed && !mirror_hud::g_active)
 		{
-			bool fire = false;
-			if (rtt_off)
-			{
-				fire = true;
-			}
-			else if (mirror_rtt::g_gun_pass_started_this_frame
-				&& !mirror_rtt::g_in_segment)
-			{
-				// case C: force-resolve the gun pass to BB if it has not
-				// already been resolved by inject/DrawPrimitive consume.
-				if (mirror_rtt::g_pass_active)
-				{
-					mirror_rtt::g_pending_early_composite = false;
-					mirror_rtt::final_composite(m_pIDirect3DDevice9);
-				}
-				fire = true;
-			}
-			// else case A or B: do not fire, stay armed for next ALPHATESTENABLE.
-			if (fire)
-			{
-				mirror_hud::g_capture_armed = false;
-				++mirror_hud::g_alphatest_fires_this_frame;
-				mirror_hud::begin_capture(m_pIDirect3DDevice9);
-			}
+			mirror_hud::g_capture_armed = false;
+			++mirror_hud::g_alphatest_fires_this_frame;
+			mirror_hud::begin_capture(m_pIDirect3DDevice9);
 		}
 		const DWORD original_value = Value;
 		bool swapped = false;
@@ -1665,6 +1612,15 @@ namespace components
 			// v34.6: latch the gun-seen flag for the entire present-cycle.
 			// Used by r_hudMirror gate; reset only on Present.
 			_renderer::gun_seen_this_present = true;
+			// v35.8: latch the per-frame dhp-seen flag. Detected here
+			// regardless of r_mirrorViewmodel_rtt (the rtt-gated
+			// begin_segment block below only fires when rtt=1, but the
+			// dhp matrix shape itself is uploaded by the engine for the
+			// gun pass even when rtt=0). Reset in BeginScene. Used by
+			// mirror_hud's PSCF c7 arming gate to reject the early/false
+			// damage-flash c7 fingerprint that fires before any dhp
+			// upload; only post-gun (real post-FX) c7 fingerprints arm.
+			mirror_rtt::g_dhp_seen_this_frame = true;
 		}
 		else if (is_std_proj)
 		{
@@ -2011,9 +1967,23 @@ namespace components
 					c70 < 0.0f && c70 > -0.2f &&
 					fapprox_eq(c70, c71) && fapprox_eq(c70, c72) &&
 					c73 > 1.0f && c73 < 5.0f;
+				// v35.8: gate arming on mirror_rtt::g_dhp_seen_this_frame.
+				// In damage-flash frames the engine emits an early c7
+				// match BEFORE the gun pass starts (during damage-overlay
+				// setup). dhp_seen=false at that moment, so we reject the
+				// arm and the subsequent ALPHATESTENABLE during world
+				// rendering will not fire begin_capture (which would pull
+				// world+gun+post-FX into HUD-RTT and produce the v35.0..v35.4
+				// and v35.7 whole-scene flip during damage). Real post-FX c7
+				// fires AFTER the gun pass with dhp_seen=true and arms
+				// normally. pscf_hits_this_frame is incremented either way
+				// for diagnostics so the dump shows total c7 fingerprint
+				// matches even if some were rejected.
 				if (is_pre_hud_signal) {
-					mirror_hud::g_capture_armed = true;
 					++mirror_hud::g_pscf_hits_this_frame;
+					if (mirror_rtt::g_dhp_seen_this_frame) {
+						mirror_hud::g_capture_armed = true;
+					}
 				}
 			}
 		}
