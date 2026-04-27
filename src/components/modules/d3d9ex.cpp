@@ -1197,6 +1197,26 @@ namespace components
 		{
 			mirror_hud::g_capture_armed = false;
 			++mirror_hud::g_alphatest_fires_this_frame;
+			// v35.4: ensure gun-RTT composite has fired BEFORE we redirect
+			// RT to HUD-RTT. Normally g_pending_early_composite is consumed
+			// by the next DrawPrimitive after PSCF c7 (post-FX tonemap-output
+			// quad), so the gun is composited to BB before any HUD-RTT
+			// activity. But during damage-flash overlays the engine can
+			// emit SetRenderState(ALPHATESTENABLE, TRUE) before that next
+			// DrawPrimitive: if begin_capture binds HUD-RTT first, the
+			// pending gun composite then lands on HUD-RTT instead of BB,
+			// and the HUD-RTT mirror composite flips it a second time so
+			// the gun appears un-mirrored on the back-buffer for the
+			// duration of the damage frame(s).
+			if (mirror_rtt::g_pending_early_composite)
+			{
+				mirror_rtt::g_pending_early_composite = false;
+				if (mirror_rtt::g_pass_active || mirror_rtt::g_in_segment)
+				{
+					if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
+					mirror_rtt::final_composite(m_pIDirect3DDevice9);
+				}
+			}
 			mirror_hud::begin_capture(m_pIDirect3DDevice9);
 		}
 		const DWORD original_value = Value;
