@@ -578,12 +578,20 @@ namespace components
 		static int  g_w                              = 0;
 		static int  g_h                              = 0;
 		static bool g_active                         = false;  // HUD RTT currently bound
-		static bool g_pending_capture_start          = false;  // set on PSCF c7 fingerprint, fires AFTER next draw
+		// v35.2: armed by PSCF c7 fingerprint (= post-FX in progress);
+		// fired by SetRenderState(ALPHATESTENABLE, TRUE) - the strong
+		// HUD-start signal. v35 fired begin_capture after the next draw
+		// post-PSCF c7, but several post-FX fullscreen quads (color
+		// grade, glow/flare additive) happen between the tonemap-output
+		// draw and the actual HUD pass, so HUD-RTT was capturing the
+		// scene image too and composite() mirrored the entire frame.
+		static bool g_capture_armed                  = false;  // PSCF c7 fingerprint detected, waiting for ALPHATESTENABLE=TRUE
 		// v35.1 diagnostic counters (printed at end-of-frame in dump)
 		static int  g_pscf_hits_this_frame           = 0;     // PSCF c7 fingerprint matches in current frame
 		static int  g_begin_calls_this_frame         = 0;     // successful begin_capture invocations
 		static int  g_rt_redirects_this_frame        = 0;     // SetRenderTarget(0,X) intercepted while g_active
 		static int  g_composite_calls_this_frame     = 0;     // composite() invocations
+		static int  g_alphatest_fires_this_frame     = 0;     // v35.2: ALPHATESTENABLE=TRUE that fired begin_capture
 
 		static void release_targets()
 		{
@@ -698,7 +706,7 @@ namespace components
 			if (g_saved_color) { g_saved_color->Release(); g_saved_color = nullptr; }
 			if (g_saved_depth) { g_saved_depth->Release(); g_saved_depth = nullptr; }
 			g_active                = false;
-			g_pending_capture_start = false;
+			g_capture_armed = false;
 			release_targets();
 		}
 	}
@@ -823,7 +831,7 @@ namespace components
 		// no longer gates anything) and the HUD capture-start pending
 		// flag at frame boundary as a belt-and-suspenders cleanup.
 		_renderer::gun_seen_this_present = false;
-		mirror_hud::g_pending_capture_start = false;
+		mirror_hud::g_capture_armed = false;
 		return m_pIDirect3DDevice9->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
 	}
 
@@ -1026,7 +1034,7 @@ namespace components
 		// bypassed by some iw3 dispatch paths). gun_seen flag is obsolete
 		// (v35 HUD-RTT path replaces v34 VSCF projection-flip path).
 		_renderer::gun_seen_this_present = false;
-		mirror_hud::g_pending_capture_start = false;
+		mirror_hud::g_capture_armed = false;
 
 		if (_renderer::mirror_dump_frames_remaining > 0)
 		{
@@ -1035,8 +1043,9 @@ namespace components
 			// ran, whether the engine rebound the RT mid-pass, and whether
 			// composite executed. Helps localize HUD mirroring failures.
 			_renderer::mirror_dump_write(
-				"  HUD: pscf_hits=%d begin_calls=%d rt_redirects=%d composite_calls=%d\n",
+				"  HUD: pscf_hits=%d alphatest_fires=%d begin_calls=%d rt_redirects=%d composite_calls=%d\n",
 				mirror_hud::g_pscf_hits_this_frame,
+				mirror_hud::g_alphatest_fires_this_frame,
 				mirror_hud::g_begin_calls_this_frame,
 				mirror_hud::g_rt_redirects_this_frame,
 				mirror_hud::g_composite_calls_this_frame);
@@ -1050,6 +1059,7 @@ namespace components
 			mirror_hud::g_begin_calls_this_frame     = 0;
 			mirror_hud::g_rt_redirects_this_frame    = 0;
 			mirror_hud::g_composite_calls_this_frame = 0;
+			mirror_hud::g_alphatest_fires_this_frame = 0;
 			if (_renderer::mirror_dump_frames_remaining == 0)
 			{
 				_renderer::mirror_dump_close();
@@ -1169,6 +1179,19 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetRenderState(D3DRENDERSTATETYPE State, DWORD Value)
 	{
+		// v35.2: HUD-RTT capture fire. ALPHATESTENABLE=TRUE is the strong
+		// HUD-start signal in iw3 - post-FX quads (tonemap, color grade,
+		// additive glow) all run with alpha-test disabled, while real HUD
+		// elements (text, ammo bar, crosshair, compass) toggle alpha-test
+		// on. Firing begin_capture HERE rather than after the first draw
+		// post-PSCF c7 keeps post-FX out of HUD-RTT, so composite()
+		// only mirrors HUD pixels (world+gun stay on the back-buffer).
+		if (State == D3DRS_ALPHATESTENABLE && Value && mirror_hud::g_capture_armed && !mirror_hud::g_active)
+		{
+			mirror_hud::g_capture_armed = false;
+			++mirror_hud::g_alphatest_fires_this_frame;
+			mirror_hud::begin_capture(m_pIDirect3DDevice9);
+		}
 		const DWORD original_value = Value;
 		bool swapped = false;
 
@@ -1362,15 +1385,11 @@ namespace components
 			mirror_rtt::g_pending_fullmirror_flip = false;
 			mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
 		}
-		// v35: HUD-RTT capture-start request from PSCF c7 fingerprint
-		// (r_hudMirror == 1). Fires AFTER tonemap-output draw so the
-		// engine's post-FX result lands on the engine's RT (BB or
-		// pingpong) and only HUD draws redirect to mirror_hud::g_color.
-		if (mirror_hud::g_pending_capture_start)
-		{
-			mirror_hud::g_pending_capture_start = false;
-			mirror_hud::begin_capture(m_pIDirect3DDevice9);
-		}
+		// v35.2: HUD-RTT capture is no longer fired from DrawPrimitive.
+		// PSCF c7 only ARMS capture; the actual fire is deferred to the
+		// first SetRenderState(ALPHATESTENABLE, TRUE) so post-FX quads
+		// (color grade, additive glow) that come after the tonemap-output
+		// draw still land on the engine's RT, not HUD-RTT.
 		return hr;
 	}
 
@@ -1404,15 +1423,11 @@ namespace components
 			mirror_rtt::g_pending_fullmirror_flip = false;
 			mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
 		}
-		// v35: HUD-RTT capture-start request from PSCF c7 fingerprint
-		// (r_hudMirror == 1). Fires AFTER tonemap-output draw so the
-		// engine's post-FX result lands on the engine's RT (BB or
-		// pingpong) and only HUD draws redirect to mirror_hud::g_color.
-		if (mirror_hud::g_pending_capture_start)
-		{
-			mirror_hud::g_pending_capture_start = false;
-			mirror_hud::begin_capture(m_pIDirect3DDevice9);
-		}
+		// v35.2: HUD-RTT capture is no longer fired from DrawIndexedPrimitive.
+		// PSCF c7 only ARMS capture; the actual fire is deferred to the
+		// first SetRenderState(ALPHATESTENABLE, TRUE) so post-FX quads
+		// (color grade, additive glow) that come after the tonemap-output
+		// draw still land on the engine's RT, not HUD-RTT.
 		return hr;
 	}
 
@@ -1859,7 +1874,7 @@ namespace components
 					fapprox_eq(c70, c71) && fapprox_eq(c70, c72) &&
 					c73 > 1.0f && c73 < 5.0f;
 				if (is_pre_hud_signal) {
-					mirror_hud::g_pending_capture_start = true;
+					mirror_hud::g_capture_armed = true;
 					++mirror_hud::g_pscf_hits_this_frame;
 				}
 			}
