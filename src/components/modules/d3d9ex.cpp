@@ -836,6 +836,13 @@ namespace components
 		// is always called before Present and always reaches our wrapper, so it is a reliable
 		// per-frame hook. Reset the viewmodel flag here too, and advance the dump counter.
 		_renderer::mirror_viewmodel_active = false;
+		// v34.7: same fallback for gun_seen_this_present. v34.6 only reset it on Present()
+		// which is bypassed by some iw3 dispatch paths, so the flag stayed stuck=true across
+		// frames and the engine's pre-world setup pass at frame start (HUD-signature ortho)
+		// got flipped, breaking world/gun. EndScene fires AFTER all HUD draws (verified by
+		// dump: late HUD flips precede '=== end of frame ===' marker), so resetting here
+		// preserves the HUD flip and clears the flag before the next frame's pre-world pass.
+		_renderer::gun_seen_this_present = false;
 
 		if (_renderer::mirror_dump_frames_remaining > 0)
 		{
