@@ -663,7 +663,14 @@ namespace components
 			dev->SetRenderState(D3DRS_FOGENABLE,         FALSE);
 			dev->SetRenderState(D3DRS_ALPHABLENDENABLE,  TRUE);
 			dev->SetRenderState(D3DRS_BLENDOP,           D3DBLENDOP_ADD);
-			dev->SetRenderState(D3DRS_SRCBLEND,          D3DBLEND_SRCALPHA);
+			// v35.3: premultiplied-alpha composite. HUD elements drawing
+			// into the cleared (0,0,0,0) HUD-RTT with their own SRCALPHA
+			// blend already premultiply color by alpha (color = src.a *
+			// src.color, alpha = src.a). Using SRCALPHA again here would
+			// re-multiply by alpha and produce a darker / grayer HUD
+			// (most visible on small low-alpha icons). ONE/INVSRCALPHA
+			// is the standard composite for premultiplied RTTs.
+			dev->SetRenderState(D3DRS_SRCBLEND,          D3DBLEND_ONE);
 			dev->SetRenderState(D3DRS_DESTBLEND,         D3DBLEND_INVSRCALPHA);
 			dev->SetRenderState(D3DRS_ALPHATESTENABLE,   FALSE);
 			dev->SetRenderState(D3DRS_STENCILENABLE,     FALSE);
