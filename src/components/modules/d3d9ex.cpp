@@ -579,6 +579,11 @@ namespace components
 		static int  g_h                              = 0;
 		static bool g_active                         = false;  // HUD RTT currently bound
 		static bool g_pending_capture_start          = false;  // set on PSCF c7 fingerprint, fires AFTER next draw
+		// v35.1 diagnostic counters (printed at end-of-frame in dump)
+		static int  g_pscf_hits_this_frame           = 0;     // PSCF c7 fingerprint matches in current frame
+		static int  g_begin_calls_this_frame         = 0;     // successful begin_capture invocations
+		static int  g_rt_redirects_this_frame        = 0;     // SetRenderTarget(0,X) intercepted while g_active
+		static int  g_composite_calls_this_frame     = 0;     // composite() invocations
 
 		static void release_targets()
 		{
@@ -618,6 +623,7 @@ namespace components
 			dev->SetDepthStencilSurface(nullptr); // HUD does not z-test
 			dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0x00000000, 1.0f, 0);
 			g_active = true;
+			++g_begin_calls_this_frame;
 		}
 
 		// Restore back-buffer as RT and composite HUD RTT onto it. mirror_x
@@ -628,6 +634,7 @@ namespace components
 		{
 			if (!g_active) return;
 			g_active = false;
+			++g_composite_calls_this_frame;
 			IDirect3DStateBlock9* sb = nullptr;
 			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
 
@@ -930,6 +937,22 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetRenderTarget(DWORD RenderTargetIndex, IDirect3DSurface9* pRenderTarget)
 	{
+		// v35.1: while HUD-RTT capture is active, intercept index-0 RT
+		// rebinds. The iw3 HUD pass starts with the engine binding the
+		// back-buffer (or its current pingpong) again right after the
+		// final tonemap-output draw. Without this hook, the engine's
+		// rebind undoes the begin_capture()-time RT switch and HUD
+		// draws land on the back-buffer instead of mirror_hud::g_color.
+		// We update g_saved_color to whatever the engine wanted, so
+		// composite() at EndScene restores the correct surface.
+		if (RenderTargetIndex == 0 && mirror_hud::g_active && pRenderTarget && pRenderTarget != mirror_hud::g_color)
+		{
+			if (mirror_hud::g_saved_color) { mirror_hud::g_saved_color->Release(); mirror_hud::g_saved_color = nullptr; }
+			mirror_hud::g_saved_color = pRenderTarget;
+			mirror_hud::g_saved_color->AddRef();
+			++mirror_hud::g_rt_redirects_this_frame;
+			return m_pIDirect3DDevice9->SetRenderTarget(RenderTargetIndex, mirror_hud::g_color);
+		}
 		return m_pIDirect3DDevice9->SetRenderTarget(RenderTargetIndex, pRenderTarget);
 	}
 
@@ -1007,10 +1030,26 @@ namespace components
 
 		if (_renderer::mirror_dump_frames_remaining > 0)
 		{
+			// v35.1: log HUD-RTT diagnostic counters at end-of-frame so the
+			// dump shows whether PSCF detection fired, whether begin_capture
+			// ran, whether the engine rebound the RT mid-pass, and whether
+			// composite executed. Helps localize HUD mirroring failures.
+			_renderer::mirror_dump_write(
+				"  HUD: pscf_hits=%d begin_calls=%d rt_redirects=%d composite_calls=%d\n",
+				mirror_hud::g_pscf_hits_this_frame,
+				mirror_hud::g_begin_calls_this_frame,
+				mirror_hud::g_rt_redirects_this_frame,
+				mirror_hud::g_composite_calls_this_frame);
 			_renderer::mirror_dump_write("\n=== end of frame %d (EndScene) ===\n",
 				_renderer::mirror_dump_frame_counter);
 			_renderer::mirror_dump_frame_counter++;
 			_renderer::mirror_dump_frames_remaining--;
+			// v35.1: reset HUD-RTT per-frame counters so each frame in the
+			// dump shows its own values.
+			mirror_hud::g_pscf_hits_this_frame       = 0;
+			mirror_hud::g_begin_calls_this_frame     = 0;
+			mirror_hud::g_rt_redirects_this_frame    = 0;
+			mirror_hud::g_composite_calls_this_frame = 0;
 			if (_renderer::mirror_dump_frames_remaining == 0)
 			{
 				_renderer::mirror_dump_close();
@@ -1819,7 +1858,10 @@ namespace components
 					c70 < 0.0f && c70 > -0.2f &&
 					fapprox_eq(c70, c71) && fapprox_eq(c70, c72) &&
 					c73 > 1.0f && c73 < 5.0f;
-				if (is_pre_hud_signal) mirror_hud::g_pending_capture_start = true;
+				if (is_pre_hud_signal) {
+					mirror_hud::g_pending_capture_start = true;
+					++mirror_hud::g_pscf_hits_this_frame;
+				}
 			}
 		}
 
