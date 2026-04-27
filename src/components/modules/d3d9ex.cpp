@@ -549,6 +549,153 @@ namespace components
 		}
 	}
 
+	// ----------------------------------------------------------------------
+	// r_hudMirror v35: HUD-only horizontal mirror via separate render target.
+	//
+	// v34 attempted to flip the HUD's 2D-ortho projection at VSCF level. That
+	// failed because the engine reuses ONE 2D-ortho matrix for stencil-mask
+	// setup, post-FX (bloom/sun-fade/color-grade tonemap), AND HUD - they are
+	// indistinguishable by matrix content, so flipping it broke post-FX too
+	// (sandy world, broken tonemap).
+	//
+	// v35 strategy: piggyback on the existing PSCF c7 fingerprint (= post-FX
+	// done, HUD next, set in SetPixelShaderConstantF). After the engine's
+	// final tonemap-output draw, redirect rendering to an off-screen HUD RTT.
+	// All subsequent draws (the HUD pass) land on HUD RTT. In EndScene
+	// wrapper we composite HUD RTT to back-buffer with optional UV-X flip
+	// when r_hudMirror==1. Designed to combine with ReShade's Flip.fx, which
+	// flips the entire final frame: with r_hudMirror=1 the HUD is pre-mirrored
+	// at engine level, then Flip.fx mirrors the whole frame, so HUD reads
+	// upright while world+gun stay mirrored. World+gun+post-FX are unchanged
+	// because we only redirect the HUD pass, not the world/post-FX passes.
+	// ----------------------------------------------------------------------
+	namespace mirror_hud
+	{
+		static IDirect3DTexture9* g_tex             = nullptr;
+		static IDirect3DSurface9* g_color           = nullptr;
+		static IDirect3DSurface9* g_saved_color     = nullptr;
+		static IDirect3DSurface9* g_saved_depth     = nullptr;
+		static int  g_w                              = 0;
+		static int  g_h                              = 0;
+		static bool g_active                         = false;  // HUD RTT currently bound
+		static bool g_pending_capture_start          = false;  // set on PSCF c7 fingerprint, fires AFTER next draw
+
+		static void release_targets()
+		{
+			if (g_color) { g_color->Release(); g_color = nullptr; }
+			if (g_tex)   { g_tex->Release();   g_tex   = nullptr; }
+			g_w = g_h = 0;
+		}
+
+		static bool ensure_targets(IDirect3DDevice9* dev)
+		{
+			IDirect3DSurface9* bb = nullptr;
+			if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return false;
+			D3DSURFACE_DESC bd; bb->GetDesc(&bd); bb->Release();
+			if (g_tex && (int)bd.Width == g_w && (int)bd.Height == g_h) return true;
+			release_targets();
+			// A8R8G8B8 (alpha for HUD transparency). HUD does not z-test in iw3,
+			// so no depth-stencil is needed.
+			if (FAILED(dev->CreateTexture(bd.Width, bd.Height, 1, D3DUSAGE_RENDERTARGET,
+				D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_tex, nullptr))) return false;
+			if (FAILED(g_tex->GetSurfaceLevel(0, &g_color))) { release_targets(); return false; }
+			g_w = (int)bd.Width;
+			g_h = (int)bd.Height;
+			return true;
+		}
+
+		// Begin capturing HUD draws. Save current RT/DSV, bind HUD RTT, clear
+		// to (0,0,0,0) so the composite alpha-blend later writes only the
+		// HUD-drawn pixels onto the back-buffer. Called once per frame, right
+		// after the engine's final tonemap-output draw (see PSCF c7 hook).
+		static void begin_capture(IDirect3DDevice9* dev)
+		{
+			if (g_active) return;
+			if (!ensure_targets(dev)) return;
+			if (FAILED(dev->GetRenderTarget(0, &g_saved_color))) { g_saved_color = nullptr; return; }
+			if (FAILED(dev->GetDepthStencilSurface(&g_saved_depth))) { g_saved_depth = nullptr; }
+			dev->SetRenderTarget(0, g_color);
+			dev->SetDepthStencilSurface(nullptr); // HUD does not z-test
+			dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0x00000000, 1.0f, 0);
+			g_active = true;
+		}
+
+		// Restore back-buffer as RT and composite HUD RTT onto it. mirror_x
+		// controls horizontal flip: false = identity copy, true = UV-X mirror.
+		// Uses standard premultiplied SRCALPHA / INVSRCALPHA blend so HUD
+		// transparent areas keep the world+gun behind them.
+		static void composite(IDirect3DDevice9* dev, bool mirror_x)
+		{
+			if (!g_active) return;
+			g_active = false;
+			IDirect3DStateBlock9* sb = nullptr;
+			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
+
+			// Restore engine RT/DSV (this is what the back-buffer or whatever
+			// the engine had bound when post-FX completed). The composite below
+			// will draw onto whatever RT is bound after restore; for the
+			// non-Flip.fx case this is typically the back-buffer.
+			if (g_saved_color) { dev->SetRenderTarget(0, g_saved_color); g_saved_color->Release(); g_saved_color = nullptr; }
+			if (g_saved_depth) { dev->SetDepthStencilSurface(g_saved_depth); g_saved_depth->Release(); g_saved_depth = nullptr; }
+			else                 dev->SetDepthStencilSurface(nullptr);
+
+			dev->SetVertexShader(nullptr);
+			dev->SetPixelShader(nullptr);
+			dev->SetRenderState(D3DRS_ZENABLE,           FALSE);
+			dev->SetRenderState(D3DRS_ZWRITEENABLE,      FALSE);
+			dev->SetRenderState(D3DRS_CULLMODE,          D3DCULL_NONE);
+			dev->SetRenderState(D3DRS_LIGHTING,          FALSE);
+			dev->SetRenderState(D3DRS_FOGENABLE,         FALSE);
+			dev->SetRenderState(D3DRS_ALPHABLENDENABLE,  TRUE);
+			dev->SetRenderState(D3DRS_BLENDOP,           D3DBLENDOP_ADD);
+			dev->SetRenderState(D3DRS_SRCBLEND,          D3DBLEND_SRCALPHA);
+			dev->SetRenderState(D3DRS_DESTBLEND,         D3DBLEND_INVSRCALPHA);
+			dev->SetRenderState(D3DRS_ALPHATESTENABLE,   FALSE);
+			dev->SetRenderState(D3DRS_STENCILENABLE,     FALSE);
+			dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+			dev->SetRenderState(D3DRS_SRGBWRITEENABLE,   FALSE);
+			dev->SetRenderState(D3DRS_COLORWRITEENABLE,
+				D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN |
+				D3DCOLORWRITEENABLE_BLUE | D3DCOLORWRITEENABLE_ALPHA);
+			dev->SetTextureStageState(0, D3DTSS_COLOROP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAOP,   D3DTOP_SELECTARG1);
+			dev->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+			dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+			dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSU,  D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_ADDRESSV,  D3DTADDRESS_CLAMP);
+			dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+			dev->SetTexture(0, g_tex);
+			dev->SetVertexDeclaration(nullptr);
+			dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+			{
+				const float W = (float)g_w;
+				const float H = (float)g_h;
+				struct V { float x, y, z, rhw, u, v; };
+				const float u0 = mirror_x ? 1.0f : 0.0f;
+				const float u1 = mirror_x ? 0.0f : 1.0f;
+				V quad[4] = {
+					{ -0.5f,    -0.5f,   0.0f, 1.0f, u0, 0.0f },
+					{  W-0.5f,  -0.5f,   0.0f, 1.0f, u1, 0.0f },
+					{ -0.5f,     H-0.5f, 0.0f, 1.0f, u0, 1.0f },
+					{  W-0.5f,   H-0.5f, 0.0f, 1.0f, u1, 1.0f },
+				};
+				dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(V));
+			}
+			if (sb) { sb->Apply(); sb->Release(); }
+		}
+
+		static void on_device_reset()
+		{
+			if (g_saved_color) { g_saved_color->Release(); g_saved_color = nullptr; }
+			if (g_saved_depth) { g_saved_depth->Release(); g_saved_depth = nullptr; }
+			g_active                = false;
+			g_pending_capture_start = false;
+			release_targets();
+		}
+	}
+
 #pragma region D3D9Device
 
 	HRESULT d3d9ex::D3D9Device::QueryInterface(REFIID riid, void** ppvObj)
@@ -665,11 +812,11 @@ namespace components
 		// NOTE: EndScene owns the dump-frame counter. Some IW3 dispatch paths route
 		// Present() around this wrapper, so relying on it alone drops frame boundaries.
 		_renderer::mirror_viewmodel_active = false;
-		// v34.6: reset HUD-mirror frame-scoped gun-seen flag at the true frame
-		// boundary. Must NOT be reset in BeginScene/EndScene because iw3 calls
-		// those mid-frame (after gun, before HUD) and we need this flag to stay
-		// set across the EndScene/BeginScene pair so the HUD pass sees gun_seen=1.
+		// v35: clear the obsolete gun_seen flag (kept for ABI/fields but
+		// no longer gates anything) and the HUD capture-start pending
+		// flag at frame boundary as a belt-and-suspenders cleanup.
 		_renderer::gun_seen_this_present = false;
+		mirror_hud::g_pending_capture_start = false;
 		return m_pIDirect3DDevice9->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
 	}
 
@@ -826,6 +973,22 @@ namespace components
 			mirror_rtt::final_composite(m_pIDirect3DDevice9);
 		}
 
+		// v35: HUD-RTT composite. If r_hudMirror==1 the HUD pass was
+		// redirected to mirror_hud::g_color after PSCF c7 fingerprint.
+		// Restore the engine's RT/DSV (back-buffer) and composite the
+		// HUD RTT onto it with horizontal UV flip. Composite must run
+		// BEFORE gui::render_loop so ImGui (debug overlays) draws on top
+		// of the HUD without being mirrored. Composite must run BEFORE
+		// the r_fullMirror=2 EndScene flip so a user combining both
+		// dvars sees HUD pre-mirrored then full-frame flipped (yielding
+		// upright HUD over mirrored world+gun, same as Flip.fx flow).
+		if (mirror_hud::g_active)
+		{
+			const int hud_mirror_eos = dvars::r_hudMirror
+				? dvars::r_hudMirror->current.integer : 0;
+			mirror_hud::composite(m_pIDirect3DDevice9, hud_mirror_eos == 1);
+		}
+
 		if (components::active.gui)
 		{
 			gui::render_loop();
@@ -836,13 +999,11 @@ namespace components
 		// is always called before Present and always reaches our wrapper, so it is a reliable
 		// per-frame hook. Reset the viewmodel flag here too, and advance the dump counter.
 		_renderer::mirror_viewmodel_active = false;
-		// v34.7: same fallback for gun_seen_this_present. v34.6 only reset it on Present()
-		// which is bypassed by some iw3 dispatch paths, so the flag stayed stuck=true across
-		// frames and the engine's pre-world setup pass at frame start (HUD-signature ortho)
-		// got flipped, breaking world/gun. EndScene fires AFTER all HUD draws (verified by
-		// dump: late HUD flips precede '=== end of frame ===' marker), so resetting here
-		// preserves the HUD flip and clears the flag before the next frame's pre-world pass.
+		// v35: same fallback reset for HUD pending flag (Present() may be
+		// bypassed by some iw3 dispatch paths). gun_seen flag is obsolete
+		// (v35 HUD-RTT path replaces v34 VSCF projection-flip path).
 		_renderer::gun_seen_this_present = false;
+		mirror_hud::g_pending_capture_start = false;
 
 		if (_renderer::mirror_dump_frames_remaining > 0)
 		{
@@ -1162,6 +1323,15 @@ namespace components
 			mirror_rtt::g_pending_fullmirror_flip = false;
 			mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
 		}
+		// v35: HUD-RTT capture-start request from PSCF c7 fingerprint
+		// (r_hudMirror == 1). Fires AFTER tonemap-output draw so the
+		// engine's post-FX result lands on the engine's RT (BB or
+		// pingpong) and only HUD draws redirect to mirror_hud::g_color.
+		if (mirror_hud::g_pending_capture_start)
+		{
+			mirror_hud::g_pending_capture_start = false;
+			mirror_hud::begin_capture(m_pIDirect3DDevice9);
+		}
 		return hr;
 	}
 
@@ -1194,6 +1364,15 @@ namespace components
 		{
 			mirror_rtt::g_pending_fullmirror_flip = false;
 			mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
+		}
+		// v35: HUD-RTT capture-start request from PSCF c7 fingerprint
+		// (r_hudMirror == 1). Fires AFTER tonemap-output draw so the
+		// engine's post-FX result lands on the engine's RT (BB or
+		// pingpong) and only HUD draws redirect to mirror_hud::g_color.
+		if (mirror_hud::g_pending_capture_start)
+		{
+			mirror_hud::g_pending_capture_start = false;
+			mirror_hud::begin_capture(m_pIDirect3DDevice9);
 		}
 		return hr;
 	}
@@ -1328,70 +1507,10 @@ namespace components
 			}
 		}
 
-		// v34: r_hudMirror = HUD-only horizontal mirror. Detects the engine
-		// 2D-ortho HUD upload by its signature c2[3]==1.0 (per the comment
-		// at the rtt segment-end check above) and negates row 0 of the math
-		// matrix in column-major D3D9 storage = pConstantData[0,4,8,12].
-		// This mirrors clip.x output for any draw using this projection so
-		// HUD geometry renders horizontally flipped. Other 2D-ortho passes
-		// (post-FX, stencil-shadow setup) use a different c2[3] value and
-		// are NOT touched. Designed to combine with ReShade's Flip.fx, which
-		// flips the entire final frame: with r_hudMirror=1 the HUD is
-		// pre-mirrored at engine level, then Flip.fx mirrors the whole
-		// frame, so HUD reads upright while world+gun stay mirrored. World
-		// and viewmodel cull stays unchanged because we only flip the HUD
-		// projection, not the world/gun projections.
-		const int hud_mirror = dvars::r_hudMirror
-			? dvars::r_hudMirror->current.integer : 0;
-		// v34.3: HUD detection signature derived from a real frame dump.
-		// True HUD 2D-ortho matrix has the fingerprint:
-		//   c2 = (0, 0, 0, 1)   c3 = (0, 0, 0, 1)
-		//   c0 = (sx, 0, 0, tx) c1 = (0, sy, 0, ty)  with sx,sy ~ 1/screen
-		// Earlier loose match (c2[3] in [0.5,1.5]) caught a non-HUD shader
-		// matrix at frame start with c2[3]=0.545 (and tiny c2[0..2] but
-		// non-zero) which broke the world. Tight match below: c2 must be
-		// (~0, ~0, ~0, ~1) AND c3 must be (~0, ~0, ~0, ~1). Identity matrix
-		// has c2=(0,0,1,0) so it's correctly excluded by the c2[2] check.
-		bool is_hud_ortho = false;
-		if (is_mtx_at_zero)
-		{
-			const float c20 = pConstantData[8];
-			const float c21 = pConstantData[9];
-			const float c22 = pConstantData[10];
-			const float c30 = pConstantData[12];
-			const float c31 = pConstantData[13];
-			const float c32 = pConstantData[14];
-			const float c33 = pConstantData[15];
-			const float eps = 1e-4f;
-			is_hud_ortho =
-				(c20 > -eps && c20 < eps) &&
-				(c21 > -eps && c21 < eps) &&
-				(c22 > -eps && c22 < eps) &&
-				(c23 > 1.0f - 1e-3f && c23 < 1.0f + 1e-3f) &&
-				(c30 > -eps && c30 < eps) &&
-				(c31 > -eps && c31 < eps) &&
-				(c32 > -eps && c32 < eps) &&
-				(c33 > 1.0f - 1e-3f && c33 < 1.0f + 1e-3f);
-		}
-		// v34.4: HUD-signature 2D-ortho also appears once BEFORE the world
-		// renders (engine setup pass with identical c0/c1/c2/c3 fingerprint).
-		// Gate flip on mirror_rtt::g_pass_active = true  (= the gun has been
-		// seen this frame). The gun renders BEFORE the HUD; the HUD renders
-		// AFTER the gun. The pre-world setup pass at frame start happens
-		// before the gun and so has g_pass_active=false at that moment, and
-		// is correctly NOT flipped. Requires r_mirrorViewmodel_rtt=1 for
-		// mirror_rtt::g_pass_active to be tracked - which is always true
-		// for the intended r_hudMirror use case (combine with Flip.fx).
-		float local_mtx_hud[16];
-		if (hud_mirror == 1 && is_hud_ortho && _renderer::gun_seen_this_present)
-		{
-			for (int i = 0; i < 16; ++i) local_mtx_hud[i] = out_data[i];
-			local_mtx_hud[0]  = -local_mtx_hud[0];
-			local_mtx_hud[4]  = -local_mtx_hud[4];
-			local_mtx_hud[8]  = -local_mtx_hud[8];
-			local_mtx_hud[12] = -local_mtx_hud[12];
-			out_data = local_mtx_hud;
-		}
+		// v35: r_hudMirror is now implemented via HUD-RTT capture (see
+		// mirror_hud:: namespace). The old v34 VSCF projection-flip path
+		// was removed because the engine shares one 2D-ortho matrix
+		// across stencil/post-FX/HUD - flipping it broke post-FX too.
 
 		// Apply flip if: this upload is a 4-row matrix at the configured flipReg AND we are in
 		// a gun pass (dhp itself, or within follow window when flipVSCF==2).
@@ -1469,11 +1588,10 @@ namespace components
 		{
 			mirror_dump_inc_vscf();
 			_renderer::mirror_dump_write(
-				"  VSCF start=%u count=%u vm_active=%d flip=%d dhp=%d stdp=%d hud_dvar=%d hud_ortho=%d gun_seen=%d\n",
+				"  VSCF start=%u count=%u vm_active=%d flip=%d dhp=%d stdp=%d\n",
 				StartRegister, Vector4fCount, (int)_renderer::mirror_viewmodel_active,
 				(out_data != pConstantData) ? 1 : 0,
-				(int)is_depth_hack_proj, (int)is_std_proj,
-				hud_mirror, (int)is_hud_ortho, (int)_renderer::gun_seen_this_present);
+				(int)is_depth_hack_proj, (int)is_std_proj);
 			const UINT rows = (Vector4fCount > 16) ? 16 : Vector4fCount;
 			for (UINT i = 0; i < rows; ++i)
 			{
@@ -1677,6 +1795,31 @@ namespace components
 					fapprox_eq(c70, c71) && fapprox_eq(c70, c72) &&
 					c73 > 1.0f && c73 < 5.0f;
 				if (is_pre_hud_signal) mirror_rtt::g_pending_fullmirror_flip = true;
+			}
+		}
+
+		// v35: detect the same PSCF c7 tonemap fingerprint INDEPENDENTLY
+		// for r_hudMirror. Sets a pending flag that fires after the next
+		// draw (the engine's final tonemap-output draw); on that fire we
+		// begin HUD-RTT capture so all subsequent HUD draws land off-screen.
+		// Matches the r_fullMirror block above structurally so the gating
+		// and fingerprint thresholds stay consistent across both paths.
+		{
+			const int hud_mirror_pscf = dvars::r_hudMirror
+				? dvars::r_hudMirror->current.integer : 0;
+			if (hud_mirror_pscf == 1 && pConstantData && StartRegister == 7 && Vector4fCount >= 1
+				&& !mirror_hud::g_active)
+			{
+				const float c70 = pConstantData[0];
+				const float c71 = pConstantData[1];
+				const float c72 = pConstantData[2];
+				const float c73 = pConstantData[3];
+				auto fapprox_eq = [](float a, float b) { float d = a - b; if (d < 0) d = -d; return d < 1e-4f; };
+				const bool is_pre_hud_signal =
+					c70 < 0.0f && c70 > -0.2f &&
+					fapprox_eq(c70, c71) && fapprox_eq(c70, c72) &&
+					c73 > 1.0f && c73 < 5.0f;
+				if (is_pre_hud_signal) mirror_hud::g_pending_capture_start = true;
 			}
 		}
 

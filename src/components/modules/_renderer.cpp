@@ -2076,15 +2076,19 @@ volatile bool _renderer::gun_seen_this_present = false;
 		// flip. Use case: combine with ReShade's Flip.fx (which mirrors the
 		// entire final back-buffer including HUD). With Flip.fx alone the HUD
 		// reads in mirror-image (numbers/text reversed). Enabling r_hudMirror
-		// pre-mirrors the HUD at the engine 2D-ortho upload; Flip.fx then
-		// flips it back so HUD is upright while world+gun stay mirrored. Note
-		// detection is by c2[3]==1.0 (the 2D-ortho HUD signature noted in
-		// d3d9ex::SetVertexShaderConstantF). Other 2D-ortho passes (post-FX,
-		// stencil-shadow setup) use different c2[3] values and are NOT
-		// touched. Compatible with r_fullMirror 0/1/2 and Flip.fx.
+		// pre-mirrors the HUD at the engine level; Flip.fx then flips it back
+		// so HUD is upright while world+gun stay mirrored. v35 implementation:
+		// HUD pass is redirected to a separate render target after the engine's
+		// post-FX completes (detected via the same PSCF c7 fingerprint that
+		// r_fullMirror=1 uses), and the HUD RTT is composited onto the back-
+		// buffer in EndScene with a horizontal UV flip. World, gun and post-FX
+		// are NOT touched by this path (v34's matrix-flip approach is removed
+		// because the engine reuses one 2D-ortho matrix across stencil/post-FX/
+		// HUD, indistinguishable by content). Compatible with r_fullMirror 0/1/2,
+		// r_mirrorViewmodel_rtt 0/1, and ReShade's Flip.fx.
 		dvars::r_hudMirror = game::Dvar_RegisterInt(
 			/* name		*/ "r_hudMirror",
-			/* desc		*/ "v34: horizontal mirror of the HUD only (does not touch world/gun/post-FX). Detects HUD by the 2D-ortho c2[3]==1.0 VSCF signature and negates row 0 of the projection matrix. Designed to combine with ReShade's Flip.fx for a montage where Flip.fx mirrors the entire frame and r_hudMirror=1 pre-mirrors HUD so the final HUD reads upright while world+gun are mirrored. 0 = off. 1 = mirror HUD.",
+			/* desc		*/ "v35: horizontal mirror of the HUD only (does not touch world/gun/post-FX). Captures the HUD pass into a separate render target after the engine's post-FX/tonemap completes, then composites it back to the back-buffer with a horizontal UV flip. Designed to combine with ReShade's Flip.fx: Flip.fx mirrors the entire frame and r_hudMirror=1 pre-mirrors HUD so the final HUD reads upright while world+gun are mirrored. 0 = off. 1 = mirror HUD.",
 			/* default	*/ 0,
 			/* minVal	*/ 0,
 			/* maxVal	*/ 1,
