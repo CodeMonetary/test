@@ -654,6 +654,19 @@ namespace components
 		static int  g_c7_match_this_frame            = 0;
 		static int  g_c7_armed_this_frame            = 0;
 		static int  g_c7_rejected_this_frame         = 0;
+		// v35.9 diagnostic+fix: count dhp uploads that arrive AFTER
+		// mirror_hud HUD-RTT capture has started (g_active=true). In
+		// damage frames the engine emits a second gun pass after
+		// begin_capture; mirror_rtt re-binds its off-screen RT through
+		// the underlying device (bypassing our SetRenderTarget hook),
+		// then end_segment restores HUD-RTT. The mirrored gun then
+		// gets composited into HUD-RTT at EndScene (mirror_rtt::final_
+		// composite blits onto whatever RT is bound), and mirror_hud::
+		// composite() flips it horizontally on the back-buffer -- the
+		// gun appears double-flipped (un-mirrored) for ~2s. The fix in
+		// EndScene restores the BB before final_composite to prevent
+		// this; this counter is purely for damage-frame verification.
+		static int  g_late_dhp_this_frame            = 0;
 
 		static void release_targets()
 		{
@@ -1083,6 +1096,7 @@ namespace components
 		mirror_hud::g_c7_match_this_frame      = 0;
 		mirror_hud::g_c7_armed_this_frame      = 0;
 		mirror_hud::g_c7_rejected_this_frame   = 0;
+		mirror_hud::g_late_dhp_this_frame      = 0;
 
 		++s_hudlog_frame;
 
@@ -1102,7 +1116,30 @@ namespace components
 		// for the first segment) and produced the "ghost" appearance.
 		if (mirror_rtt::g_pass_active || mirror_rtt::g_in_segment)
 		{
-			mirror_rtt::final_composite(m_pIDirect3DDevice9);
+			// v35.9 fix: in damage frames the engine emits a SECOND gun
+			// pass AFTER mirror_hud::begin_capture has bound HUD-RTT. The
+			// gun renders into mirror_rtt::g_color, end_segment restores
+			// HUD-RTT (since begin_segment captured it as the saved RT),
+			// and final_composite below would blit the mirrored gun into
+			// HUD-RTT. mirror_hud::composite() then flips HUD-RTT to BB,
+			// double-flipping the gun (gun appears UN-mirrored on screen
+			// for ~2s during the damage flash). Restore BB binding here
+			// so final_composite blits gun onto BB directly, then re-bind
+			// HUD-RTT so mirror_hud::composite() at line below has the
+			// expected state. Normal frames take the else branch since
+			// inject_into_tonemap_source already set g_pass_active=false
+			// during post-FX (this whole if-block is skipped), so v35.9
+			// is a no-op outside the damage path.
+			if (mirror_hud::g_active && mirror_hud::g_saved_color)
+			{
+				m_pIDirect3DDevice9->SetRenderTarget(0, mirror_hud::g_saved_color);
+				mirror_rtt::final_composite(m_pIDirect3DDevice9);
+				m_pIDirect3DDevice9->SetRenderTarget(0, mirror_hud::g_color);
+			}
+			else
+			{
+				mirror_rtt::final_composite(m_pIDirect3DDevice9);
+			}
 		}
 
 		// v35: HUD-RTT composite. If r_hudMirror==1 the HUD pass was
@@ -1150,11 +1187,14 @@ namespace components
 		//   dhp     : g_dhp_seen_this_frame at EndScene
 		//   final   : g_final_composite_done_this_frame at EndScene
 		//   hud_act : g_active at EndScene (HUD-RTT was bound)
+		//   late_dhp: v35.9 -- dhp uploads after begin_capture (>=1 in damage
+		//             frames; trigger for the v35.9 EndScene fix)
+		//   rt      : v35.9 -- SetRenderTarget redirects to HUD-RTT this frame
 		if (hudlog_level() >= 2)
 		{
 			game::Com_PrintMessage(0, utils::va(
 				"[hudlog] f=%u SUMMARY c7=%d armed=%d reject=%d fire=%d beg=%d comp=%d "
-				"dhp=%d final=%d hud_act=%d\n",
+				"dhp=%d final=%d hud_act=%d late_dhp=%d rt=%d\n",
 				s_hudlog_frame,
 				mirror_hud::g_c7_match_this_frame,
 				mirror_hud::g_c7_armed_this_frame,
@@ -1164,7 +1204,9 @@ namespace components
 				mirror_hud::g_composite_calls_this_frame,
 				(int)mirror_rtt::g_dhp_seen_this_frame,
 				(int)mirror_rtt::g_final_composite_done_this_frame,
-				(int)mirror_hud::g_active), 0);
+				(int)mirror_hud::g_active,
+				mirror_hud::g_late_dhp_this_frame,
+				mirror_hud::g_rt_redirects_this_frame), 0);
 		}
 
 		if (_renderer::mirror_dump_frames_remaining > 0)
@@ -1719,6 +1761,22 @@ namespace components
 					(int)mirror_rtt::g_final_composite_done_this_frame,
 					mirror_hud::g_c7_match_this_frame,
 					mirror_hud::g_c7_rejected_this_frame), 0);
+			}
+
+			// v35.9 diagnostic: dhp uploads that arrive AFTER mirror_hud
+			// HUD-RTT capture has started. These are the "second gun pass"
+			// in damage frames that drive the EndScene double-flip bug; the
+			// EndScene fix below covers them. Counter is reported in SUMMARY.
+			if (mirror_hud::g_active)
+			{
+				++mirror_hud::g_late_dhp_this_frame;
+				if (hudlog_level() >= 2)
+				{
+					game::Com_PrintMessage(0, utils::va(
+						"[hudlog] f=%u dhp_upload (LATE, after begin_capture) late_dhp=%d\n",
+						s_hudlog_frame,
+						mirror_hud::g_late_dhp_this_frame), 0);
+				}
 			}
 		}
 		else if (is_std_proj)
