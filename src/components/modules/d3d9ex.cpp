@@ -70,6 +70,13 @@ namespace components
 		// rejects that early-c7 (no fire), while still arming on a real
 		// post-FX c7 that fires AFTER the gun pass (HUD captures normally).
 		static bool g_dhp_seen_this_frame           = false;
+		// v35.11: full per-frame counters for dhp / segment / inject events
+		// (the v35.8/v35.10 booleans were too coarse to detect anomalies).
+		static int  g_dhp_count_this_frame          = 0;
+		static int  g_begin_seg_count_this_frame    = 0;
+		static int  g_end_seg_count_this_frame      = 0;
+		static int  g_inject_calls_this_frame       = 0;
+		static int  g_inject_ok_count_this_frame    = 0;
 
 		// v32: full-screen mirror (`r_fullMirror`).
 		//   0 = off
@@ -125,6 +132,7 @@ namespace components
 				g_pass_active = true;
 			}
 			g_in_segment = true;
+			++g_begin_seg_count_this_frame; // v35.11
 		}
 
 		// Switch back to engine's color+depth so post-viewmodel world draws are visible.
@@ -137,6 +145,7 @@ namespace components
 			if (g_saved_color) { dev->SetRenderTarget(0, g_saved_color); g_saved_color->Release(); g_saved_color = nullptr; }
 			if (g_saved_depth) { dev->SetDepthStencilSurface(g_saved_depth); g_saved_depth->Release(); g_saved_depth = nullptr; }
 			else                 dev->SetDepthStencilSurface(nullptr);
+			++g_end_seg_count_this_frame; // v35.11
 		}
 
 		// v33 (ported from cod4mirror): rewrite main depth-stencil at the
@@ -235,6 +244,7 @@ namespace components
 
 		static bool inject_into_tonemap_source(IDirect3DDevice9* dev)
 		{
+			++g_inject_calls_this_frame; // v35.11 (count includes pre-checks)
 			if (g_in_segment) end_segment(dev);
 			if (!g_pass_active) return false;
 
@@ -353,6 +363,7 @@ namespace components
 				// during damage flash (when g_pass_active was false at entry
 				// and inject returned ok=false at the !g_pass_active early-out).
 				g_final_composite_done_this_frame = true;
+				++g_inject_ok_count_this_frame; // v35.11
 			}
 			return ok;
 		}
@@ -1087,6 +1098,11 @@ namespace components
 		// v35.8: clear the per-frame "dhp seen" latch. Set at SVP when
 		// the engine first uploads a depth-hack-projection (gun) matrix.
 		mirror_rtt::g_dhp_seen_this_frame = false;
+		mirror_rtt::g_dhp_count_this_frame       = 0; // v35.11
+		mirror_rtt::g_begin_seg_count_this_frame = 0; // v35.11
+		mirror_rtt::g_end_seg_count_this_frame   = 0; // v35.11
+		mirror_rtt::g_inject_calls_this_frame    = 0; // v35.11
+		mirror_rtt::g_inject_ok_count_this_frame = 0; // v35.11
 
 		// v35.8.1 diagnostic: reset HUD-RTT per-frame counters here so values
 		// represent ONLY the current frame even when /mirror_dump is OFF. The
@@ -1227,12 +1243,47 @@ namespace components
 		//             gun re-render after begin_capture: the gun matrix is
 		//             flipped, gun renders into HUD-RTT, composite() flips
 		//             horizontally, double-flip => un-mirrored gun on BB.
+		//   dhp_n   : v35.11 -- total dhp_upload events this frame (>1 means
+		//             multiple gun-pass starts, e.g. damage flinch re-render)
+		//   bsg/esg : v35.11 -- begin_segment/end_segment call counts
+		//   inj     : v35.11 -- inject_into_tonemap_source ok/total counts
+		//   follow_end: v35.11 -- mirror_vscf_follow_remaining at SUMMARY
+		//             (should be 0 if gun pass fully resolved; non-zero =>
+		//             flip-window left armed past end of gun pass)
+		//   pass_end: v35.11 -- mirror_rtt::g_pass_active at SUMMARY
+		//             (should be 0 if final_composite ran; 1 => gun pass
+		//             never composited, scheduled for EndScene fallback)
 		if (hudlog_level() >= 2)
 		{
+			// v35.11: print a one-shot snapshot of mirror-related dvars the
+			// first time hudlog is active. Verifies the test config matches
+			// expectations (rtt, mirrorFx, hudMirror, flipReg, flipFollow).
+			static bool s_dvar_snapshot_emitted = false;
+			if (!s_dvar_snapshot_emitted)
+			{
+				s_dvar_snapshot_emitted = true;
+				const auto iv = [](game::dvar_s* d){ return d ? d->current.integer : -1; };
+				game::Com_PrintMessage(0, utils::va(
+					"[hudlog] DVAR SNAPSHOT r_hudMirror=%d r_mirrorViewmodel_rtt=%d "
+					"method=%d mirrorFx=%d flipReg=%d flipFollow=%d flipVSCF=%d "
+					"depthFix=%d cullFix=%d rttBlend=%d rttTonemapInject=%d\n",
+					iv(dvars::r_hudMirror),
+					iv(dvars::r_mirrorViewmodel_rtt),
+					iv(dvars::r_mirrorViewmodel_method),
+					iv(dvars::r_mirrorViewmodel_mirrorFx),
+					iv(dvars::r_mirrorViewmodel_flipReg),
+					iv(dvars::r_mirrorViewmodel_flipFollow),
+					iv(dvars::r_mirrorViewmodel_flipVSCF),
+					iv(dvars::r_mirrorViewmodel_depthFix),
+					iv(dvars::r_mirrorViewmodel_cullFix),
+					iv(dvars::r_mirrorViewmodel_rttBlend),
+					iv(dvars::r_mirrorViewmodel_rttTonemapInject)), 0);
+			}
 			game::Com_PrintMessage(0, utils::va(
 				"[hudlog] f=%u SUMMARY c7=%d armed=%d reject=%d fire=%d beg=%d comp=%d "
 				"dhp=%d final=%d hud_act=%d late_dhp=%d rt=%d "
-				"inj_fail=%d early_comp=%d comp_in_hud=%d draws_in_hud=%d mtx64_in_hud=%d\n",
+				"inj_fail=%d early_comp=%d comp_in_hud=%d draws_in_hud=%d mtx64_in_hud=%d "
+				"dhp_n=%d bsg=%d esg=%d inj=%d/%d follow_end=%d pass_end=%d\n",
 				s_hudlog_frame,
 				mirror_hud::g_c7_match_this_frame,
 				mirror_hud::g_c7_armed_this_frame,
@@ -1249,7 +1300,14 @@ namespace components
 				mirror_hud::g_early_comp_this_frame,
 				mirror_hud::g_comp_during_hud_this_frame,
 				mirror_hud::g_draws_during_hud_this_frame,
-				mirror_hud::g_mtx_flipreg_during_hud_this_frame), 0);
+				mirror_hud::g_mtx_flipreg_during_hud_this_frame,
+				mirror_rtt::g_dhp_count_this_frame,
+				mirror_rtt::g_begin_seg_count_this_frame,
+				mirror_rtt::g_end_seg_count_this_frame,
+				mirror_rtt::g_inject_ok_count_this_frame,
+				mirror_rtt::g_inject_calls_this_frame,
+				_renderer::mirror_vscf_follow_remaining,
+				(int)mirror_rtt::g_pass_active), 0);
 		}
 
 		if (_renderer::mirror_dump_frames_remaining > 0)
@@ -1801,6 +1859,7 @@ namespace components
 			// upload; only post-gun (real post-FX) c7 fingerprints arm.
 			const bool dhp_was_seen = mirror_rtt::g_dhp_seen_this_frame;
 			mirror_rtt::g_dhp_seen_this_frame = true;
+			++mirror_rtt::g_dhp_count_this_frame; // v35.11
 
 			// v35.8.1 diagnostic: log only on FIRST dhp upload of the frame
 			// (subsequent dhp uploads in the same frame would spam the log).
