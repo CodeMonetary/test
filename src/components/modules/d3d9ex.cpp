@@ -667,6 +667,18 @@ namespace components
 		// EndScene restores the BB before final_composite to prevent
 		// this; this counter is purely for damage-frame verification.
 		static int  g_late_dhp_this_frame            = 0;
+		// v35.10 diagnostic counters. Goal: find the mechanism that
+		// makes the gun appear UN-mirrored for ~2s during damage flash
+		// when r_hudMirror=1. v35.9 hypothesis (late dhp upload after
+		// begin_capture) was REFUTED by user log: late_dhp=0, rt=0 in
+		// all 654 frames. Plus user tested flipFollow=9999 -- bug
+		// persists, so VSCF flip-window exhaustion is also not it.
+		// These counters track other suspect events:
+		static int  g_inj_fail_this_frame            = 0; // inject_into_tonemap_source returned false (fallback to pending_early_composite)
+		static int  g_early_comp_this_frame          = 0; // pending_early_composite triggered final_composite from Draw[Indexed]Primitive
+		static int  g_comp_during_hud_this_frame     = 0; // final_composite ran while HUD-RTT was bound (g_active=true)
+		static int  g_draws_during_hud_this_frame    = 0; // Draw[Indexed]Primitive while g_active=true (post-capture rendering volume)
+		static int  g_mtx_flipreg_during_hud_this_frame = 0; // VSCF 4-row matrix upload at flipReg while g_active=true (suspected gun re-render)
 
 		static void release_targets()
 		{
@@ -1097,6 +1109,11 @@ namespace components
 		mirror_hud::g_c7_armed_this_frame      = 0;
 		mirror_hud::g_c7_rejected_this_frame   = 0;
 		mirror_hud::g_late_dhp_this_frame      = 0;
+		mirror_hud::g_inj_fail_this_frame             = 0;
+		mirror_hud::g_early_comp_this_frame           = 0;
+		mirror_hud::g_comp_during_hud_this_frame      = 0;
+		mirror_hud::g_draws_during_hud_this_frame     = 0;
+		mirror_hud::g_mtx_flipreg_during_hud_this_frame = 0;
 
 		++s_hudlog_frame;
 
@@ -1132,6 +1149,11 @@ namespace components
 			// is a no-op outside the damage path.
 			if (mirror_hud::g_active && mirror_hud::g_saved_color)
 			{
+				// v35.10 diagnostic: this is the v35.9 BB-restore path. Count
+				// it whenever mirror_rtt has a pending gun pass at EndScene
+				// while HUD-RTT is bound -- the bug-trigger condition.
+				if (mirror_rtt::g_pass_active || mirror_rtt::g_in_segment)
+					++mirror_hud::g_comp_during_hud_this_frame;
 				m_pIDirect3DDevice9->SetRenderTarget(0, mirror_hud::g_saved_color);
 				mirror_rtt::final_composite(m_pIDirect3DDevice9);
 				m_pIDirect3DDevice9->SetRenderTarget(0, mirror_hud::g_color);
@@ -1190,11 +1212,27 @@ namespace components
 		//   late_dhp: v35.9 -- dhp uploads after begin_capture (>=1 in damage
 		//             frames; trigger for the v35.9 EndScene fix)
 		//   rt      : v35.9 -- SetRenderTarget redirects to HUD-RTT this frame
+		//   inj_fail: v35.10 -- inject_into_tonemap_source returned false
+		//             (fallback to pending_early_composite path)
+		//   early_comp: v35.10 -- pending_early_composite consumed by Draw
+		//   comp_in_hud: v35.10 -- final_composite ran while HUD-RTT bound
+		//             (this is the v35.9 fix's trigger condition; should
+		//             be 0 in normal frames; non-zero in damage means the
+		//             v35.9 BB-restore path was taken at EndScene)
+		//   draws_in_hud: v35.10 -- Draw[Indexed]Primitive while HUD-RTT
+		//             bound. Higher in damage frames would point at extra
+		//             rendering happening into HUD-RTT (post-capture work).
+		//   mtx64_in_hud: v35.10 -- VSCF 4-row matrix upload at flipReg
+		//             while HUD-RTT bound. >=1 strongly suggests a stealth
+		//             gun re-render after begin_capture: the gun matrix is
+		//             flipped, gun renders into HUD-RTT, composite() flips
+		//             horizontally, double-flip => un-mirrored gun on BB.
 		if (hudlog_level() >= 2)
 		{
 			game::Com_PrintMessage(0, utils::va(
 				"[hudlog] f=%u SUMMARY c7=%d armed=%d reject=%d fire=%d beg=%d comp=%d "
-				"dhp=%d final=%d hud_act=%d late_dhp=%d rt=%d\n",
+				"dhp=%d final=%d hud_act=%d late_dhp=%d rt=%d "
+				"inj_fail=%d early_comp=%d comp_in_hud=%d draws_in_hud=%d mtx64_in_hud=%d\n",
 				s_hudlog_frame,
 				mirror_hud::g_c7_match_this_frame,
 				mirror_hud::g_c7_armed_this_frame,
@@ -1206,7 +1244,12 @@ namespace components
 				(int)mirror_rtt::g_final_composite_done_this_frame,
 				(int)mirror_hud::g_active,
 				mirror_hud::g_late_dhp_this_frame,
-				mirror_hud::g_rt_redirects_this_frame), 0);
+				mirror_hud::g_rt_redirects_this_frame,
+				mirror_hud::g_inj_fail_this_frame,
+				mirror_hud::g_early_comp_this_frame,
+				mirror_hud::g_comp_during_hud_this_frame,
+				mirror_hud::g_draws_during_hud_this_frame,
+				mirror_hud::g_mtx_flipreg_during_hud_this_frame), 0);
 		}
 
 		if (_renderer::mirror_dump_frames_remaining > 0)
@@ -1571,6 +1614,11 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::DrawPrimitive(D3DPRIMITIVETYPE PrimitiveType, UINT StartVertex, UINT PrimitiveCount)
 	{
+		// v35.10 diagnostic: count draws emitted while HUD-RTT is bound.
+		// In normal frames the HUD pass after begin_capture only draws
+		// 2D HUD elements; in damage frames a higher count or new VSCF
+		// matrix uploads at flipReg would point at a stealth gun render.
+		if (mirror_hud::g_active) ++mirror_hud::g_draws_during_hud_this_frame;
 		if (_renderer::mirror_dump_active())
 		{
 			mirror_dump_inc_draw();
@@ -1585,6 +1633,8 @@ namespace components
 			if (mirror_rtt::g_pass_active || mirror_rtt::g_in_segment)
 			{
 				if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
+				++mirror_hud::g_early_comp_this_frame; // v35.10
+				if (mirror_hud::g_active) ++mirror_hud::g_comp_during_hud_this_frame; // v35.10
 				mirror_rtt::final_composite(m_pIDirect3DDevice9);
 			}
 		}
@@ -1606,6 +1656,7 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::DrawIndexedPrimitive(D3DPRIMITIVETYPE PrimitiveType, INT BaseVertexIndex, UINT MinVertexIndex, UINT NumVertices, UINT startIndex, UINT primCount)
 	{
+		if (mirror_hud::g_active) ++mirror_hud::g_draws_during_hud_this_frame; // v35.10
 		if (_renderer::mirror_dump_active())
 		{
 			mirror_dump_inc_draw();
@@ -1623,6 +1674,8 @@ namespace components
 			if (mirror_rtt::g_pass_active || mirror_rtt::g_in_segment)
 			{
 				if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
+				++mirror_hud::g_early_comp_this_frame; // v35.10
+				if (mirror_hud::g_active) ++mirror_hud::g_comp_during_hud_this_frame; // v35.10
 				mirror_rtt::final_composite(m_pIDirect3DDevice9);
 			}
 		}
@@ -1821,6 +1874,13 @@ namespace components
 		// a gun pass (dhp itself, or within follow window when flipVSCF==2).
 		// When rtt is on, the off-screen render path replaces matrix-flip; disable it.
 		const bool is_target_mtx = (pConstantData && Vector4fCount == 4 && (int)StartRegister == flipReg);
+		// v35.10 diagnostic: count gun-matrix-shape uploads (4-row at flipReg)
+		// that arrive while HUD-RTT capture is in progress. If non-zero in
+		// damage frames, a stealth gun re-render is happening with the HUD
+		// RT bound -- the matrix-flipped gun would land on HUD-RTT, then
+		// composite() flips horizontally, double-flipping it (un-mirrored).
+		if (is_target_mtx && mirror_hud::g_active)
+			++mirror_hud::g_mtx_flipreg_during_hud_this_frame;
 		bool apply_flip = false;
 		if (is_target_mtx && flipVSCF != 0 && !rtt_on)
 		{
@@ -2077,6 +2137,8 @@ namespace components
 					// instead set a pending flag so we composite AFTER that draw.
 					if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
 					mirror_rtt::g_pending_early_composite = true;
+					// v35.10 diagnostic: inject failed -> fallback active
+					++mirror_hud::g_inj_fail_this_frame;
 				}
 			}
 		}
