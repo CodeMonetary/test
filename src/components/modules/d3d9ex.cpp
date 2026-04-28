@@ -9,6 +9,18 @@ namespace components
 	extern void mirror_dump_inc_pscf();
 	extern void mirror_dump_inc_draw();
 
+	// v35.8.1 diagnostic: monotonic frame counter for HUD-mirror logging.
+	// Independent of /mirror_dump file capture; events are written to console.log
+	// whenever r_mirrorViewmodel_log >= 2, including across grenade-damage frames
+	// where the user cannot type /mirror_dump in time.
+	static unsigned int s_hudlog_frame = 0;
+
+	static inline int hudlog_level()
+	{
+		return dvars::r_mirrorViewmodel_log
+			? dvars::r_mirrorViewmodel_log->current.integer : 0;
+	}
+
 	// ----------------------------------------------------------------------
 	// r_mirrorViewmodel: render-to-texture mirror.
 	//
@@ -632,6 +644,16 @@ namespace components
 		static int  g_rt_redirects_this_frame        = 0;     // SetRenderTarget(0,X) intercepted while g_active
 		static int  g_composite_calls_this_frame     = 0;     // composite() invocations
 		static int  g_alphatest_fires_this_frame     = 0;     // v35.2: ALPHATESTENABLE=TRUE that fired begin_capture
+		// v35.8.1 diagnostic counters: per-frame breakdown of c7 fingerprint
+		// matches by arming-gate outcome.
+		//   match    : total PSCF c7 calls whose values pass the (-x,-x,-x,gamma) shape
+		//   armed    : matches that ALSO had mirror_rtt::g_dhp_seen_this_frame=true
+		//              (i.e. arming gate accepted, capture would fire on next ALPHATESTENABLE)
+		//   rejected : matches with dhp_seen=false (early/pre-gun c7, gate rejected -- HUD
+		//              will NOT capture this frame, HUD ends up un-mirrored)
+		static int  g_c7_match_this_frame            = 0;
+		static int  g_c7_armed_this_frame            = 0;
+		static int  g_c7_rejected_this_frame         = 0;
 
 		static void release_targets()
 		{
@@ -1041,6 +1063,29 @@ namespace components
 		// the engine first uploads a depth-hack-projection (gun) matrix.
 		mirror_rtt::g_dhp_seen_this_frame = false;
 
+		// v35.8.1 diagnostic: reset HUD-RTT per-frame counters here so values
+		// represent ONLY the current frame even when /mirror_dump is OFF. The
+		// previous code reset only inside the dump-active block in EndScene,
+		// so the FIRST captured frame inherited accumulated counts from every
+		// prior frame since process start (visible as bogus pscf_hits=2359 in
+		// frame 0 of mirror_dump_20260428_015927.txt). Reset at frame START is
+		// authoritative.
+		mirror_hud::g_pscf_hits_this_frame       = 0;
+		mirror_hud::g_alphatest_fires_this_frame = 0;
+		mirror_hud::g_begin_calls_this_frame     = 0;
+		mirror_hud::g_rt_redirects_this_frame    = 0;
+		mirror_hud::g_composite_calls_this_frame = 0;
+
+		// v35.8.1 diagnostic counters (cumulative within this frame, used for
+		// the EndScene log line). Tracked separately from existing dump
+		// counters so we can attribute c7 fingerprint matches that were
+		// rejected by the v35.8 dhp_seen arming gate vs ones that armed.
+		mirror_hud::g_c7_match_this_frame      = 0;
+		mirror_hud::g_c7_armed_this_frame      = 0;
+		mirror_hud::g_c7_rejected_this_frame   = 0;
+
+		++s_hudlog_frame;
+
 		if (_renderer::mirror_dump_active())
 		{
 			_renderer::mirror_dump_write("\n=== BEGIN frame %d (BeginScene) ===\n",
@@ -1091,6 +1136,36 @@ namespace components
 		// (v35 HUD-RTT path replaces v34 VSCF projection-flip path).
 		_renderer::gun_seen_this_present = false;
 		mirror_hud::g_capture_armed = false;
+
+		// v35.8.1 diagnostic: per-frame HUD-mirror summary to console.log
+		// (independent of /mirror_dump). Gated on r_mirrorViewmodel_log>=2 so
+		// it can run during a real grenade-damage frame -- the user cannot type
+		// /mirror_dump fast enough to catch the 2-second damage flash.
+		//   c7      : total c7 fingerprint matches
+		//   armed   : matches that passed dhp_seen gate (would arm capture)
+		//   reject  : matches rejected by gate (HUD will not capture)
+		//   fire    : ALPHATESTENABLE=TRUE that fired begin_capture
+		//   beg     : successful begin_capture invocations
+		//   comp    : composite() invocations
+		//   dhp     : g_dhp_seen_this_frame at EndScene
+		//   final   : g_final_composite_done_this_frame at EndScene
+		//   hud_act : g_active at EndScene (HUD-RTT was bound)
+		if (hudlog_level() >= 2)
+		{
+			game::Com_PrintMessage(0, utils::va(
+				"[hudlog] f=%u SUMMARY c7=%d armed=%d reject=%d fire=%d beg=%d comp=%d "
+				"dhp=%d final=%d hud_act=%d\n",
+				s_hudlog_frame,
+				mirror_hud::g_c7_match_this_frame,
+				mirror_hud::g_c7_armed_this_frame,
+				mirror_hud::g_c7_rejected_this_frame,
+				mirror_hud::g_alphatest_fires_this_frame,
+				mirror_hud::g_begin_calls_this_frame,
+				mirror_hud::g_composite_calls_this_frame,
+				(int)mirror_rtt::g_dhp_seen_this_frame,
+				(int)mirror_rtt::g_final_composite_done_this_frame,
+				(int)mirror_hud::g_active), 0);
+		}
 
 		if (_renderer::mirror_dump_frames_remaining > 0)
 		{
@@ -1276,6 +1351,15 @@ namespace components
 			mirror_hud::g_capture_armed = false;
 			++mirror_hud::g_alphatest_fires_this_frame;
 			mirror_hud::begin_capture(m_pIDirect3DDevice9);
+			// v35.8.1 diagnostic: log begin_capture fire (HUD-RTT capture starting).
+			if (hudlog_level() >= 2)
+			{
+				game::Com_PrintMessage(0, utils::va(
+					"[hudlog] f=%u fire begin_capture (alpha_fire=%d beg=%d)\n",
+					s_hudlog_frame,
+					mirror_hud::g_alphatest_fires_this_frame,
+					mirror_hud::g_begin_calls_this_frame), 0);
+			}
 		}
 		const DWORD original_value = Value;
 		bool swapped = false;
@@ -1620,7 +1704,22 @@ namespace components
 			// mirror_hud's PSCF c7 arming gate to reject the early/false
 			// damage-flash c7 fingerprint that fires before any dhp
 			// upload; only post-gun (real post-FX) c7 fingerprints arm.
+			const bool dhp_was_seen = mirror_rtt::g_dhp_seen_this_frame;
 			mirror_rtt::g_dhp_seen_this_frame = true;
+
+			// v35.8.1 diagnostic: log only on FIRST dhp upload of the frame
+			// (subsequent dhp uploads in the same frame would spam the log).
+			if (!dhp_was_seen && hudlog_level() >= 2)
+			{
+				game::Com_PrintMessage(0, utils::va(
+					"[hudlog] f=%u dhp_upload (first) pass_active=%d in_seg=%d final_done=%d c7_match_so_far=%d c7_rejected_so_far=%d\n",
+					s_hudlog_frame,
+					(int)mirror_rtt::g_pass_active,
+					(int)mirror_rtt::g_in_segment,
+					(int)mirror_rtt::g_final_composite_done_this_frame,
+					mirror_hud::g_c7_match_this_frame,
+					mirror_hud::g_c7_rejected_this_frame), 0);
+			}
 		}
 		else if (is_std_proj)
 		{
@@ -1981,8 +2080,25 @@ namespace components
 				// matches even if some were rejected.
 				if (is_pre_hud_signal) {
 					++mirror_hud::g_pscf_hits_this_frame;
-					if (mirror_rtt::g_dhp_seen_this_frame) {
+					++mirror_hud::g_c7_match_this_frame;
+					const bool armed_now = mirror_rtt::g_dhp_seen_this_frame;
+					if (armed_now) {
 						mirror_hud::g_capture_armed = true;
+						++mirror_hud::g_c7_armed_this_frame;
+					} else {
+						++mirror_hud::g_c7_rejected_this_frame;
+					}
+					// v35.8.1 diagnostic: log every c7 fingerprint match with arming
+					// gate outcome. "armed" = will fire begin_capture on next
+					// ALPHATESTENABLE=TRUE; "rejected" = early/pre-gun c7 dropped
+					// by v35.8 gate (HUD will NOT capture this c7).
+					if (hudlog_level() >= 2)
+					{
+						game::Com_PrintMessage(0, utils::va(
+							"[hudlog] f=%u c7_match c=(%.6f %.6f %.6f %.6f) dhp_seen=%d -> %s\n",
+							s_hudlog_frame, c70, c71, c72, c73,
+							(int)mirror_rtt::g_dhp_seen_this_frame,
+							armed_now ? "ARMED" : "REJECTED"), 0);
 					}
 				}
 			}
