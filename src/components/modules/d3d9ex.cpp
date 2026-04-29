@@ -779,6 +779,26 @@ namespace components
 			dev->SetRenderTarget(0, g_color);
 			dev->SetDepthStencilSurface(nullptr); // HUD does not z-test
 			dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0x00000000, 1.0f, 0);
+
+			// v35.16: enable separate alpha blending so the HUD-RTT alpha
+			// channel accumulates linearly (src.a * 1 + dst.a * (1-src.a))
+			// instead of being multiplied by itself when HUD draws use the
+			// standard SRCALPHA/INVSRCALPHA blend. Without this every HUD
+			// pass squares its own alpha contribution into the (0,0,0,0)-
+			// cleared RTT, so the final ONE/INVSRCALPHA composite uses
+			// (1 - src.a^2) instead of (1 - src.a) as the back-buffer blend
+			// weight. Visible on the killstreak text and world-space
+			// player nicknames -- they use a custom outline pixel shader
+			// (vsh=1 psh=1 inside HUD pass per v35.13 log) that paints an
+			// outline + main glyph, and the alpha-squaring made the dark
+			// outline appear noticeably bolder/heavier than r_hudMirror=0.
+			// With SEPARATEALPHABLENDENABLE on and SRCBLENDALPHA=ONE,
+			// DESTBLENDALPHA=INVSRCALPHA the math is mathematically
+			// equivalent to direct-to-BB rendering for SRCALPHA sources.
+			dev->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, TRUE);
+			dev->SetRenderState(D3DRS_SRCBLENDALPHA,            D3DBLEND_ONE);
+			dev->SetRenderState(D3DRS_DESTBLENDALPHA,           D3DBLEND_INVSRCALPHA);
+
 			g_active = true;
 			++g_begin_calls_this_frame;
 		}
@@ -812,6 +832,11 @@ namespace components
 			dev->SetRenderState(D3DRS_FOGENABLE,         FALSE);
 			dev->SetRenderState(D3DRS_ALPHABLENDENABLE,  TRUE);
 			dev->SetRenderState(D3DRS_BLENDOP,           D3DBLENDOP_ADD);
+			// v35.16: composite uses uniform ONE/INVSRCALPHA on color+alpha;
+			// disable separate-alpha-blend (which begin_capture turns on)
+			// so the single SRCBLEND/DESTBLEND below applies to both
+			// channels during the final HUD-RTT -> BB composite draw.
+			dev->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
 			// v35.3: premultiplied-alpha composite. HUD elements drawing
 			// into the cleared (0,0,0,0) HUD-RTT with their own SRCALPHA
 			// blend already premultiply color by alpha (color = src.a *
