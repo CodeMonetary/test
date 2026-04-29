@@ -748,6 +748,11 @@ namespace components
 		// into HUD-RTT (currently the outline appears bolder than the
 		// direct-to-BB version at r_hudMirror=0).
 		static bool g_logged_first_outline_state_this_frame = false;
+		// v35.19: number of D3DRS_SRCBLENDALPHA / DESTBLENDALPHA overrides
+		// applied this frame inside the HUD-RTT capture window (see
+		// SetRenderState hook). Expected ~ vsh/psh frame count when the
+		// killstreak / nickname outline shader is rendering.
+		static int  g_alpha_blend_overrides_this_frame      = 0;
 
 		static void release_targets()
 		{
@@ -1201,6 +1206,7 @@ namespace components
 		mirror_hud::g_shader_escapes_this_frame              = 0;     // v35.14
 		mirror_hud::g_logged_first_shader_escape_this_frame  = false; // v35.14
 		mirror_hud::g_logged_first_outline_state_this_frame  = false; // v35.18
+		mirror_hud::g_alpha_blend_overrides_this_frame       = 0;     // v35.19
 
 		++s_hudlog_frame;
 
@@ -1355,7 +1361,7 @@ namespace components
 				"dhp=%d final=%d hud_act=%d late_dhp=%d rt=%d "
 				"inj_fail=%d early_comp=%d comp_in_hud=%d draws_in_hud=%d mtx64_in_hud=%d "
 				"dhp_n=%d bsg=%d esg=%d inj=%d/%d follow_end=%d pass_end=%d prev_dhp=%d "
-				"bigtex=%d vsh=%d psh=%d bigprim=%d esc=%d\n",
+				"bigtex=%d vsh=%d psh=%d bigprim=%d esc=%d ablend_ovr=%d\n",
 				s_hudlog_frame,
 				mirror_hud::g_c7_match_this_frame,
 				mirror_hud::g_c7_armed_this_frame,
@@ -1385,7 +1391,8 @@ namespace components
 				mirror_hud::g_vshader_in_hud_this_frame,    // v35.13
 				mirror_hud::g_pshader_in_hud_this_frame,    // v35.13
 				mirror_hud::g_big_prim_in_hud_this_frame,   // v35.13
-				mirror_hud::g_shader_escapes_this_frame),   // v35.14
+				mirror_hud::g_shader_escapes_this_frame,    // v35.14
+				mirror_hud::g_alpha_blend_overrides_this_frame), // v35.19
 				0);
 		}
 
@@ -1581,6 +1588,31 @@ namespace components
 					s_hudlog_frame,
 					mirror_hud::g_alphatest_fires_this_frame,
 					mirror_hud::g_begin_calls_this_frame), 0);
+			}
+		}
+		// v35.19: while HUD-RTT is active, override the alpha-channel blend
+		// factors set by the engine. The killstreak / nickname outline
+		// shader uses SEPARATEALPHABLENDENABLE=TRUE with SRCBLENDALPHA=
+		// INVDESTALPHA, DESTBLENDALPHA=ZERO -- math that depends on
+		// dst.alpha=1 (the back buffer's default) and breaks when our
+		// HUD-RTT is cleared to alpha=0. Forcing ONE / INVSRCALPHA on
+		// the alpha channel makes the outline accumulate linearly so
+		// the final ONE/INVSRCALPHA composite produces the same pixels
+		// as direct-to-BB rendering. For HUD draws with SEPARATEALPHA-
+		// BLENDENABLE=FALSE these alpha-channel factors are unused, so
+		// overriding them is a no-op there. Confined to g_active=true
+		// so it cannot leak into world / gun rendering.
+		if (mirror_hud::g_active)
+		{
+			if (State == D3DRS_SRCBLENDALPHA && Value != (DWORD)D3DBLEND_ONE)
+			{
+				Value = (DWORD)D3DBLEND_ONE;
+				++mirror_hud::g_alpha_blend_overrides_this_frame;
+			}
+			else if (State == D3DRS_DESTBLENDALPHA && Value != (DWORD)D3DBLEND_INVSRCALPHA)
+			{
+				Value = (DWORD)D3DBLEND_INVSRCALPHA;
+				++mirror_hud::g_alpha_blend_overrides_this_frame;
 			}
 		}
 		const DWORD original_value = Value;
