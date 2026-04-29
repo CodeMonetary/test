@@ -741,6 +741,13 @@ namespace components
 		static bool g_last_ps_nonnull                       = false;
 		static int  g_shader_escapes_this_frame             = 0;
 		static bool g_logged_first_shader_escape_this_frame = false;
+		// v35.18: dump device blend / alpha / color-write state at the
+		// first custom-shader draw inside the HUD-RTT window. Used to
+		// identify how the killstreak / nickname outline shader is
+		// configured so we can match its visual exactly when rendering
+		// into HUD-RTT (currently the outline appears bolder than the
+		// direct-to-BB version at r_hudMirror=0).
+		static bool g_logged_first_outline_state_this_frame = false;
 
 		static void release_targets()
 		{
@@ -1193,6 +1200,7 @@ namespace components
 		mirror_hud::g_logged_first_pshader_this_frame = false; // v35.13
 		mirror_hud::g_shader_escapes_this_frame              = 0;     // v35.14
 		mirror_hud::g_logged_first_shader_escape_this_frame  = false; // v35.14
+		mirror_hud::g_logged_first_outline_state_this_frame  = false; // v35.18
 
 		++s_hudlog_frame;
 
@@ -1797,6 +1805,53 @@ namespace components
 			++mirror_hud::g_draws_during_hud_this_frame;
 			if (PrimitiveCount >= 64) ++mirror_hud::g_big_prim_in_hud_this_frame; // v35.13
 		}
+		// v35.18: dump blend/alpha state on the first non-FFP draw of
+		// the frame inside HUD-RTT (the killstreak/nickname outline
+		// shader is the only known producer of vsh/psh non-null draws
+		// in normal alive frames per v35.13 log).
+		if (mirror_hud::g_active
+			&& (mirror_hud::g_last_vs_nonnull || mirror_hud::g_last_ps_nonnull)
+			&& !mirror_hud::g_logged_first_outline_state_this_frame
+			&& hudlog_level() >= 2)
+		{
+			mirror_hud::g_logged_first_outline_state_this_frame = true;
+			DWORD rs_abe = 0, rs_src = 0, rs_dst = 0, rs_op = 0;
+			DWORD rs_sabe = 0, rs_srca = 0, rs_dsta = 0, rs_opa = 0;
+			DWORD rs_ate = 0, rs_aref = 0, rs_afn = 0;
+			DWORD rs_cwe = 0, rs_srgb = 0, rs_bf = 0;
+			DWORD rs_zen = 0, rs_zwe = 0, rs_cull = 0;
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHABLENDENABLE,         &rs_abe);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRCBLEND,                 &rs_src);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_DESTBLEND,                &rs_dst);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_BLENDOP,                  &rs_op);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, &rs_sabe);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRCBLENDALPHA,            &rs_srca);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_DESTBLENDALPHA,           &rs_dsta);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_BLENDOPALPHA,             &rs_opa);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHATESTENABLE,          &rs_ate);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHAREF,                 &rs_aref);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHAFUNC,                &rs_afn);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_COLORWRITEENABLE,         &rs_cwe);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRGBWRITEENABLE,          &rs_srgb);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_BLENDFACTOR,              &rs_bf);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_ZENABLE,                  &rs_zen);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_ZWRITEENABLE,             &rs_zwe);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_CULLMODE,                 &rs_cull);
+			game::Com_PrintMessage(0, utils::va(
+				"[hudlog] f=%u outline_state kind=dp prim=%u vs=%d ps=%d tex0_rt=%d"
+				" abe=%u src=%u dst=%u op=%u"
+				" sabe=%u srca=%u dsta=%u opa=%u"
+				" ate=%u aref=%u afn=%u cwe=0x%X srgb=%u bf=0x%08X"
+				" zen=%u zwe=%u cull=%u\n",
+				s_hudlog_frame, PrimitiveCount,
+				(int)mirror_hud::g_last_vs_nonnull,
+				(int)mirror_hud::g_last_ps_nonnull,
+				(int)mirror_hud::g_last_tex0_is_big_rt,
+				rs_abe, rs_src, rs_dst, rs_op,
+				rs_sabe, rs_srca, rs_dsta, rs_opa,
+				rs_ate, rs_aref, rs_afn, rs_cwe, rs_srgb, rs_bf,
+				rs_zen, rs_zwe, rs_cull), 0);
+		}
 		// v35.15: narrowed escape -- only redirect draws that sample a
 		// large RENDERTARGET texture at stage 0 (the post-FX scene RT).
 		// v35.14 used (vs_nonnull || ps_nonnull) which also matched HUD
@@ -1865,6 +1920,52 @@ namespace components
 		if (mirror_hud::g_active) {
 			++mirror_hud::g_draws_during_hud_this_frame; // v35.10
 			if (primCount >= 64) ++mirror_hud::g_big_prim_in_hud_this_frame; // v35.13
+		}
+		// v35.18: dump blend/alpha state on the first non-FFP draw of
+		// the frame inside HUD-RTT (the killstreak/nickname outline
+		// shader). Same as DrawPrimitive but kind=dip.
+		if (mirror_hud::g_active
+			&& (mirror_hud::g_last_vs_nonnull || mirror_hud::g_last_ps_nonnull)
+			&& !mirror_hud::g_logged_first_outline_state_this_frame
+			&& hudlog_level() >= 2)
+		{
+			mirror_hud::g_logged_first_outline_state_this_frame = true;
+			DWORD rs_abe = 0, rs_src = 0, rs_dst = 0, rs_op = 0;
+			DWORD rs_sabe = 0, rs_srca = 0, rs_dsta = 0, rs_opa = 0;
+			DWORD rs_ate = 0, rs_aref = 0, rs_afn = 0;
+			DWORD rs_cwe = 0, rs_srgb = 0, rs_bf = 0;
+			DWORD rs_zen = 0, rs_zwe = 0, rs_cull = 0;
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHABLENDENABLE,         &rs_abe);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRCBLEND,                 &rs_src);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_DESTBLEND,                &rs_dst);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_BLENDOP,                  &rs_op);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, &rs_sabe);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRCBLENDALPHA,            &rs_srca);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_DESTBLENDALPHA,           &rs_dsta);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_BLENDOPALPHA,             &rs_opa);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHATESTENABLE,          &rs_ate);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHAREF,                 &rs_aref);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHAFUNC,                &rs_afn);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_COLORWRITEENABLE,         &rs_cwe);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRGBWRITEENABLE,          &rs_srgb);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_BLENDFACTOR,              &rs_bf);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_ZENABLE,                  &rs_zen);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_ZWRITEENABLE,             &rs_zwe);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_CULLMODE,                 &rs_cull);
+			game::Com_PrintMessage(0, utils::va(
+				"[hudlog] f=%u outline_state kind=dip prim=%u nverts=%u vs=%d ps=%d tex0_rt=%d"
+				" abe=%u src=%u dst=%u op=%u"
+				" sabe=%u srca=%u dsta=%u opa=%u"
+				" ate=%u aref=%u afn=%u cwe=0x%X srgb=%u bf=0x%08X"
+				" zen=%u zwe=%u cull=%u\n",
+				s_hudlog_frame, primCount, NumVertices,
+				(int)mirror_hud::g_last_vs_nonnull,
+				(int)mirror_hud::g_last_ps_nonnull,
+				(int)mirror_hud::g_last_tex0_is_big_rt,
+				rs_abe, rs_src, rs_dst, rs_op,
+				rs_sabe, rs_srca, rs_dsta, rs_opa,
+				rs_ate, rs_aref, rs_afn, rs_cwe, rs_srgb, rs_bf,
+				rs_zen, rs_zwe, rs_cull), 0);
 		}
 		// v35.15: narrowed escape (see DrawPrimitive comment). Only
 		// redirect draws that sample a large RENDERTARGET texture at
