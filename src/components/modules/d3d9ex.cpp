@@ -717,6 +717,30 @@ namespace components
 		static bool g_logged_first_vshader_this_frame = false;
 		static bool g_logged_first_pshader_this_frame = false;
 
+		// v35.14: shader-draw escape mechanism for HUD-RTT.
+		//
+		// v35.13 log showed that during the damage flash / death cam a
+		// fullscreen post-FX draw runs BETWEEN begin_capture and the
+		// first real HUD draw:
+		//   - stage-0 texture = 1280x720 A8R8G8B8 RENDERTARGET (scene)
+		//   - SetVertexShader + SetPixelShader both non-null
+		//   - 1 fullscreen-quad DrawPrimitive
+		// With HUD-RTT bound that quad writes INTO HUD-RTT; composite()
+		// then horizontally flips HUD-RTT onto BB so the sampled scene
+		// appears mirrored (the "world flip" bug) for ~42 frames per
+		// event.
+		//
+		// Normal HUD draws always use the FFP (null VS AND null PS):
+		// vsh=0 psh=0 across 2208 non-bug frames vs vsh=2 psh=2 in 84
+		// bug frames in the v35.13 log -> reliable signal. While g_active
+		// is true, any Draw[Indexed]Primitive issued with a non-null
+		// vertex or pixel shader is redirected to g_saved_color (BB)
+		// for the duration of that single draw, then HUD-RTT is re-bound.
+		static bool g_last_vs_nonnull                       = false;
+		static bool g_last_ps_nonnull                       = false;
+		static int  g_shader_escapes_this_frame             = 0;
+		static bool g_logged_first_shader_escape_this_frame = false;
+
 		static void release_targets()
 		{
 			if (g_color) { g_color->Release(); g_color = nullptr; }
@@ -1166,6 +1190,8 @@ namespace components
 		mirror_hud::g_logged_first_big_tex_this_frame = false; // v35.13
 		mirror_hud::g_logged_first_vshader_this_frame = false; // v35.13
 		mirror_hud::g_logged_first_pshader_this_frame = false; // v35.13
+		mirror_hud::g_shader_escapes_this_frame              = 0;     // v35.14
+		mirror_hud::g_logged_first_shader_escape_this_frame  = false; // v35.14
 
 		++s_hudlog_frame;
 
@@ -1320,7 +1346,7 @@ namespace components
 				"dhp=%d final=%d hud_act=%d late_dhp=%d rt=%d "
 				"inj_fail=%d early_comp=%d comp_in_hud=%d draws_in_hud=%d mtx64_in_hud=%d "
 				"dhp_n=%d bsg=%d esg=%d inj=%d/%d follow_end=%d pass_end=%d prev_dhp=%d "
-				"bigtex=%d vsh=%d psh=%d bigprim=%d\n",
+				"bigtex=%d vsh=%d psh=%d bigprim=%d esc=%d\n",
 				s_hudlog_frame,
 				mirror_hud::g_c7_match_this_frame,
 				mirror_hud::g_c7_armed_this_frame,
@@ -1349,7 +1375,8 @@ namespace components
 				mirror_hud::g_big_tex_in_hud_this_frame,    // v35.13
 				mirror_hud::g_vshader_in_hud_this_frame,    // v35.13
 				mirror_hud::g_pshader_in_hud_this_frame,    // v35.13
-				mirror_hud::g_big_prim_in_hud_this_frame),  // v35.13
+				mirror_hud::g_big_prim_in_hud_this_frame,   // v35.13
+				mirror_hud::g_shader_escapes_this_frame),   // v35.14
 				0);
 		}
 
@@ -1749,6 +1776,28 @@ namespace components
 			++mirror_hud::g_draws_during_hud_this_frame;
 			if (PrimitiveCount >= 64) ++mirror_hud::g_big_prim_in_hud_this_frame; // v35.13
 		}
+		// v35.14: shader-draw escape. When a draw inside the HUD-RTT
+		// capture window uses a non-null VS or PS, it's a post-FX /
+		// 3D draw (confirmed by v35.13 log); redirect it to the saved
+		// BB so composite() won't UV-flip it onto the screen.
+		const bool v35_14_escape_dp =
+			mirror_hud::g_active
+			&& (mirror_hud::g_last_vs_nonnull || mirror_hud::g_last_ps_nonnull)
+			&& mirror_hud::g_saved_color;
+		if (v35_14_escape_dp) {
+			++mirror_hud::g_shader_escapes_this_frame;
+			if (!mirror_hud::g_logged_first_shader_escape_this_frame && hudlog_level() >= 2) {
+				mirror_hud::g_logged_first_shader_escape_this_frame = true;
+				game::Com_PrintMessage(0, utils::va(
+					"[hudlog] f=%u shader_escape kind=dp prim=%u vs=%d ps=%d\n",
+					s_hudlog_frame, PrimitiveCount,
+					(int)mirror_hud::g_last_vs_nonnull,
+					(int)mirror_hud::g_last_ps_nonnull), 0);
+			}
+			m_pIDirect3DDevice9->SetRenderTarget(0, mirror_hud::g_saved_color);
+			if (mirror_hud::g_saved_depth)
+				m_pIDirect3DDevice9->SetDepthStencilSurface(mirror_hud::g_saved_depth);
+		}
 		if (_renderer::mirror_dump_active())
 		{
 			mirror_dump_inc_draw();
@@ -1757,6 +1806,10 @@ namespace components
 				PrimitiveCount, _renderer::mirror_vscf_follow_remaining);
 		}
 		HRESULT hr = m_pIDirect3DDevice9->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
+		if (v35_14_escape_dp) {
+			m_pIDirect3DDevice9->SetRenderTarget(0, mirror_hud::g_color);
+			m_pIDirect3DDevice9->SetDepthStencilSurface(nullptr);
+		}
 		if (mirror_rtt::g_pending_early_composite)
 		{
 			mirror_rtt::g_pending_early_composite = false;
@@ -1790,6 +1843,25 @@ namespace components
 			++mirror_hud::g_draws_during_hud_this_frame; // v35.10
 			if (primCount >= 64) ++mirror_hud::g_big_prim_in_hud_this_frame; // v35.13
 		}
+		// v35.14: shader-draw escape (see DrawPrimitive comment).
+		const bool v35_14_escape_dip =
+			mirror_hud::g_active
+			&& (mirror_hud::g_last_vs_nonnull || mirror_hud::g_last_ps_nonnull)
+			&& mirror_hud::g_saved_color;
+		if (v35_14_escape_dip) {
+			++mirror_hud::g_shader_escapes_this_frame;
+			if (!mirror_hud::g_logged_first_shader_escape_this_frame && hudlog_level() >= 2) {
+				mirror_hud::g_logged_first_shader_escape_this_frame = true;
+				game::Com_PrintMessage(0, utils::va(
+					"[hudlog] f=%u shader_escape kind=dip prim=%u nverts=%u vs=%d ps=%d\n",
+					s_hudlog_frame, primCount, NumVertices,
+					(int)mirror_hud::g_last_vs_nonnull,
+					(int)mirror_hud::g_last_ps_nonnull), 0);
+			}
+			m_pIDirect3DDevice9->SetRenderTarget(0, mirror_hud::g_saved_color);
+			if (mirror_hud::g_saved_depth)
+				m_pIDirect3DDevice9->SetDepthStencilSurface(mirror_hud::g_saved_depth);
+		}
 		if (_renderer::mirror_dump_active())
 		{
 			mirror_dump_inc_draw();
@@ -1798,6 +1870,10 @@ namespace components
 				primCount, NumVertices, _renderer::mirror_vscf_follow_remaining);
 		}
 		HRESULT hr = m_pIDirect3DDevice9->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
+		if (v35_14_escape_dip) {
+			m_pIDirect3DDevice9->SetRenderTarget(0, mirror_hud::g_color);
+			m_pIDirect3DDevice9->SetDepthStencilSurface(nullptr);
+		}
 		// v22: composite the mirrored viewmodel right AFTER the engine's
 		// final tonemap/output draw (the first draw following the PSCF c7
 		// fingerprint). The pending flag was set by SetPixelShaderConstantF.
@@ -1875,6 +1951,8 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetVertexShader(IDirect3DVertexShader9* pShader)
 	{
+		// v35.14: track last non-null state for shader-draw escape in Draw hooks.
+		mirror_hud::g_last_vs_nonnull = (pShader != nullptr);
 		// v35.13: HUD draws use null vertex shader (FFP). A non-null vertex
 		// shader inside the begin_capture..composite window means a 3D-style
 		// draw is landing in HUD-RTT (suspected world / killcam content).
@@ -2194,6 +2272,8 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetPixelShader(IDirect3DPixelShader9* pShader)
 	{
+		// v35.14: track last non-null state for shader-draw escape in Draw hooks.
+		mirror_hud::g_last_ps_nonnull = (pShader != nullptr);
 		// v35.13: HUD draws use null pixel shader (FFP). A non-null pixel
 		// shader inside the begin_capture..composite window means a shaded
 		// 3D draw is landing in HUD-RTT (suspected world / killcam content).
