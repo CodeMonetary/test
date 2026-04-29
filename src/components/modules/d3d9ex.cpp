@@ -700,6 +700,22 @@ namespace components
 		static int  g_comp_during_hud_this_frame     = 0; // final_composite ran while HUD-RTT was bound (g_active=true)
 		static int  g_draws_during_hud_this_frame    = 0; // Draw[Indexed]Primitive while g_active=true (post-capture rendering volume)
 		static int  g_mtx_flipreg_during_hud_this_frame = 0; // VSCF 4-row matrix upload at flipReg while g_active=true (suspected gun re-render)
+		// v35.13: per-frame markers for non-HUD content captured into HUD-RTT.
+		// Used to find the death-cam world-flip bug: with v35.12 the c7 gate
+		// now arms in death cam, so begin_capture starts the HUD-RTT capture.
+		// If a fullscreen-textured quad (e.g. killcam preview, scene-image
+		// overlay) or a 3D-shaded draw lands inside the begin_capture..
+		// composite window it ends up UV-flipped onto BB by composite() and
+		// looks like "the world flipped".
+		static int  g_big_tex_in_hud_this_frame      = 0; // SetTexture(stage=0) with width>=512 while g_active (likely fullscreen content)
+		static int  g_vshader_in_hud_this_frame      = 0; // SetVertexShader(non-null) while g_active (3D content marker)
+		static int  g_pshader_in_hud_this_frame      = 0; // SetPixelShader(non-null) while g_active (3D shader marker)
+		static int  g_big_prim_in_hud_this_frame     = 0; // Draw[Indexed]Primitive primCount>=64 while g_active (large mesh)
+		// v35.13: latched first-occurrence flags so we log the smoking-gun
+		// event ONCE per frame instead of every draw call.
+		static bool g_logged_first_big_tex_this_frame = false;
+		static bool g_logged_first_vshader_this_frame = false;
+		static bool g_logged_first_pshader_this_frame = false;
 
 		static void release_targets()
 		{
@@ -1143,6 +1159,13 @@ namespace components
 		mirror_hud::g_comp_during_hud_this_frame      = 0;
 		mirror_hud::g_draws_during_hud_this_frame     = 0;
 		mirror_hud::g_mtx_flipreg_during_hud_this_frame = 0;
+		mirror_hud::g_big_tex_in_hud_this_frame       = 0; // v35.13
+		mirror_hud::g_vshader_in_hud_this_frame       = 0; // v35.13
+		mirror_hud::g_pshader_in_hud_this_frame       = 0; // v35.13
+		mirror_hud::g_big_prim_in_hud_this_frame      = 0; // v35.13
+		mirror_hud::g_logged_first_big_tex_this_frame = false; // v35.13
+		mirror_hud::g_logged_first_vshader_this_frame = false; // v35.13
+		mirror_hud::g_logged_first_pshader_this_frame = false; // v35.13
 
 		++s_hudlog_frame;
 
@@ -1296,7 +1319,8 @@ namespace components
 				"[hudlog] f=%u SUMMARY c7=%d armed=%d reject=%d fire=%d beg=%d comp=%d "
 				"dhp=%d final=%d hud_act=%d late_dhp=%d rt=%d "
 				"inj_fail=%d early_comp=%d comp_in_hud=%d draws_in_hud=%d mtx64_in_hud=%d "
-				"dhp_n=%d bsg=%d esg=%d inj=%d/%d follow_end=%d pass_end=%d prev_dhp=%d\n",
+				"dhp_n=%d bsg=%d esg=%d inj=%d/%d follow_end=%d pass_end=%d prev_dhp=%d "
+				"bigtex=%d vsh=%d psh=%d bigprim=%d\n",
 				s_hudlog_frame,
 				mirror_hud::g_c7_match_this_frame,
 				mirror_hud::g_c7_armed_this_frame,
@@ -1321,7 +1345,12 @@ namespace components
 				mirror_rtt::g_inject_calls_this_frame,
 				_renderer::mirror_vscf_follow_remaining,
 				(int)mirror_rtt::g_pass_active,
-				(int)mirror_rtt::g_dhp_seen_prev_frame), 0);
+				(int)mirror_rtt::g_dhp_seen_prev_frame,
+				mirror_hud::g_big_tex_in_hud_this_frame,    // v35.13
+				mirror_hud::g_vshader_in_hud_this_frame,    // v35.13
+				mirror_hud::g_pshader_in_hud_this_frame,    // v35.13
+				mirror_hud::g_big_prim_in_hud_this_frame),  // v35.13
+				0);
 		}
 
 		if (_renderer::mirror_dump_frames_remaining > 0)
@@ -1606,6 +1635,32 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetTexture(DWORD Stage, IDirect3DBaseTexture9* pTexture)
 	{
+		// v35.13: detect fullscreen-textured quads landing in HUD-RTT.
+		// In death cam the killcam preview / scene-image overlay can
+		// arrive between begin_capture and the real HUD draws; UV-flipped
+		// in composite() it looks like the world is mirrored.
+		if (mirror_hud::g_active && Stage == 0 && pTexture)
+		{
+			D3DRESOURCETYPE rt = pTexture->GetType();
+			if (rt == D3DRTYPE_TEXTURE)
+			{
+				IDirect3DTexture9* tex2d = static_cast<IDirect3DTexture9*>(pTexture);
+				D3DSURFACE_DESC sd = {};
+				if (SUCCEEDED(tex2d->GetLevelDesc(0, &sd)) && sd.Width >= 512u)
+				{
+					++mirror_hud::g_big_tex_in_hud_this_frame;
+					if (!mirror_hud::g_logged_first_big_tex_this_frame && hudlog_level() >= 2)
+					{
+						mirror_hud::g_logged_first_big_tex_this_frame = true;
+						game::Com_PrintMessage(0, utils::va(
+							"[hudlog] f=%u big_tex_in_hud stage=0 w=%u h=%u fmt=0x%X usage=0x%X pool=%d (n_so_far=%d)\n",
+							s_hudlog_frame, sd.Width, sd.Height, (unsigned)sd.Format,
+							(unsigned)sd.Usage, (int)sd.Pool,
+							mirror_hud::g_big_tex_in_hud_this_frame), 0);
+					}
+				}
+			}
+		}
 		return m_pIDirect3DDevice9->SetTexture(Stage, pTexture);
 	}
 
@@ -1690,7 +1745,10 @@ namespace components
 		// In normal frames the HUD pass after begin_capture only draws
 		// 2D HUD elements; in damage frames a higher count or new VSCF
 		// matrix uploads at flipReg would point at a stealth gun render.
-		if (mirror_hud::g_active) ++mirror_hud::g_draws_during_hud_this_frame;
+		if (mirror_hud::g_active) {
+			++mirror_hud::g_draws_during_hud_this_frame;
+			if (PrimitiveCount >= 64) ++mirror_hud::g_big_prim_in_hud_this_frame; // v35.13
+		}
 		if (_renderer::mirror_dump_active())
 		{
 			mirror_dump_inc_draw();
@@ -1728,7 +1786,10 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::DrawIndexedPrimitive(D3DPRIMITIVETYPE PrimitiveType, INT BaseVertexIndex, UINT MinVertexIndex, UINT NumVertices, UINT startIndex, UINT primCount)
 	{
-		if (mirror_hud::g_active) ++mirror_hud::g_draws_during_hud_this_frame; // v35.10
+		if (mirror_hud::g_active) {
+			++mirror_hud::g_draws_during_hud_this_frame; // v35.10
+			if (primCount >= 64) ++mirror_hud::g_big_prim_in_hud_this_frame; // v35.13
+		}
 		if (_renderer::mirror_dump_active())
 		{
 			mirror_dump_inc_draw();
@@ -1814,6 +1875,21 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetVertexShader(IDirect3DVertexShader9* pShader)
 	{
+		// v35.13: HUD draws use null vertex shader (FFP). A non-null vertex
+		// shader inside the begin_capture..composite window means a 3D-style
+		// draw is landing in HUD-RTT (suspected world / killcam content).
+		if (mirror_hud::g_active && pShader)
+		{
+			++mirror_hud::g_vshader_in_hud_this_frame;
+			if (!mirror_hud::g_logged_first_vshader_this_frame && hudlog_level() >= 2)
+			{
+				mirror_hud::g_logged_first_vshader_this_frame = true;
+				game::Com_PrintMessage(0, utils::va(
+					"[hudlog] f=%u vshader_in_hud first ptr=%p draws_so_far=%d\n",
+					s_hudlog_frame, (void*)pShader,
+					mirror_hud::g_draws_during_hud_this_frame), 0);
+			}
+		}
 		return m_pIDirect3DDevice9->SetVertexShader(pShader);
 	}
 
@@ -2118,6 +2194,21 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetPixelShader(IDirect3DPixelShader9* pShader)
 	{
+		// v35.13: HUD draws use null pixel shader (FFP). A non-null pixel
+		// shader inside the begin_capture..composite window means a shaded
+		// 3D draw is landing in HUD-RTT (suspected world / killcam content).
+		if (mirror_hud::g_active && pShader)
+		{
+			++mirror_hud::g_pshader_in_hud_this_frame;
+			if (!mirror_hud::g_logged_first_pshader_this_frame && hudlog_level() >= 2)
+			{
+				mirror_hud::g_logged_first_pshader_this_frame = true;
+				game::Com_PrintMessage(0, utils::va(
+					"[hudlog] f=%u pshader_in_hud first ptr=%p draws_so_far=%d\n",
+					s_hudlog_frame, (void*)pShader,
+					mirror_hud::g_draws_during_hud_this_frame), 0);
+			}
+		}
 		return m_pIDirect3DDevice9->SetPixelShader(pShader);
 	}
 
