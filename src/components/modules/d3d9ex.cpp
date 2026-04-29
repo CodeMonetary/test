@@ -1590,31 +1590,13 @@ namespace components
 					mirror_hud::g_begin_calls_this_frame), 0);
 			}
 		}
-		// v35.19: while HUD-RTT is active, override the alpha-channel blend
-		// factors set by the engine. The killstreak / nickname outline
-		// shader uses SEPARATEALPHABLENDENABLE=TRUE with SRCBLENDALPHA=
-		// INVDESTALPHA, DESTBLENDALPHA=ZERO -- math that depends on
-		// dst.alpha=1 (the back buffer's default) and breaks when our
-		// HUD-RTT is cleared to alpha=0. Forcing ONE / INVSRCALPHA on
-		// the alpha channel makes the outline accumulate linearly so
-		// the final ONE/INVSRCALPHA composite produces the same pixels
-		// as direct-to-BB rendering. For HUD draws with SEPARATEALPHA-
-		// BLENDENABLE=FALSE these alpha-channel factors are unused, so
-		// overriding them is a no-op there. Confined to g_active=true
-		// so it cannot leak into world / gun rendering.
-		if (mirror_hud::g_active)
-		{
-			if (State == D3DRS_SRCBLENDALPHA && Value != (DWORD)D3DBLEND_ONE)
-			{
-				Value = (DWORD)D3DBLEND_ONE;
-				++mirror_hud::g_alpha_blend_overrides_this_frame;
-			}
-			else if (State == D3DRS_DESTBLENDALPHA && Value != (DWORD)D3DBLEND_INVSRCALPHA)
-			{
-				Value = (DWORD)D3DBLEND_INVSRCALPHA;
-				++mirror_hud::g_alpha_blend_overrides_this_frame;
-			}
-		}
+		// v35.20: SetRenderState override removed -- v35.19 log showed
+		// ablend_ovr=0 every frame because the engine sets SRCBLENDALPHA
+		// / DESTBLENDALPHA via a state block (CreateStateBlock + Apply)
+		// rather than individual SetRenderState calls. Override moved
+		// into Draw[Indexed]Primitive to guarantee it fires immediately
+		// before the outline-shader draw regardless of how the values
+		// got onto the device.
 		const DWORD original_value = Value;
 		bool swapped = false;
 
@@ -1884,6 +1866,26 @@ namespace components
 				rs_ate, rs_aref, rs_afn, rs_cwe, rs_srgb, rs_bf,
 				rs_zen, rs_zwe, rs_cull), 0);
 		}
+		// v35.20: force linear alpha-channel blend on outline-shader draws
+		// (vsh / psh non-null inside HUD-RTT). The engine's outline shader
+		// uses SRCBLENDALPHA=INVDESTALPHA / DESTBLENDALPHA=ZERO via a state
+		// block (so SetRenderState hook never sees it -- v35.19 ablend_ovr=0
+		// confirmed). That math wants dst.alpha=1 (back-buffer default),
+		// but HUD-RTT is cleared to alpha=0 so the alpha channel collapses
+		// to 0 and the outline ends up additively painted on the final
+		// back-buffer (visible as a bolder dark outline + tinted glyphs).
+		// Force ONE / INVSRCALPHA right here so alpha accumulates linearly
+		// and the final ONE/INVSRCALPHA composite reproduces direct-to-BB
+		// blending exactly. SEPARATEALPHABLENDENABLE itself is whatever
+		// the engine set (TRUE for outline draws); we only retarget the
+		// alpha factors. HUD draws with sabe=FALSE ignore them.
+		if (mirror_hud::g_active
+			&& (mirror_hud::g_last_vs_nonnull || mirror_hud::g_last_ps_nonnull))
+		{
+			m_pIDirect3DDevice9->SetRenderState(D3DRS_SRCBLENDALPHA,  D3DBLEND_ONE);
+			m_pIDirect3DDevice9->SetRenderState(D3DRS_DESTBLENDALPHA, D3DBLEND_INVSRCALPHA);
+			++mirror_hud::g_alpha_blend_overrides_this_frame;
+		}
 		// v35.15: narrowed escape -- only redirect draws that sample a
 		// large RENDERTARGET texture at stage 0 (the post-FX scene RT).
 		// v35.14 used (vs_nonnull || ps_nonnull) which also matched HUD
@@ -1998,6 +2000,16 @@ namespace components
 				rs_sabe, rs_srca, rs_dsta, rs_opa,
 				rs_ate, rs_aref, rs_afn, rs_cwe, rs_srgb, rs_bf,
 				rs_zen, rs_zwe, rs_cull), 0);
+		}
+		// v35.20: force linear alpha-channel blend on outline-shader draws
+		// (see DrawPrimitive comment for why -- bypasses engine state
+		// block by setting the values immediately before the draw).
+		if (mirror_hud::g_active
+			&& (mirror_hud::g_last_vs_nonnull || mirror_hud::g_last_ps_nonnull))
+		{
+			m_pIDirect3DDevice9->SetRenderState(D3DRS_SRCBLENDALPHA,  D3DBLEND_ONE);
+			m_pIDirect3DDevice9->SetRenderState(D3DRS_DESTBLENDALPHA, D3DBLEND_INVSRCALPHA);
+			++mirror_hud::g_alpha_blend_overrides_this_frame;
 		}
 		// v35.15: narrowed escape (see DrawPrimitive comment). Only
 		// redirect draws that sample a large RENDERTARGET texture at
