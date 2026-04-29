@@ -70,6 +70,16 @@ namespace components
 		// rejects that early-c7 (no fire), while still arming on a real
 		// post-FX c7 that fires AFTER the gun pass (HUD captures normally).
 		static bool g_dhp_seen_this_frame           = false;
+		// v35.12: snapshot of g_dhp_seen_this_frame from the PREVIOUS frame.
+		// Latched on BeginScene before the per-frame reset. Used by mirror_hud
+		// PSCF c7 arming gate to ACCEPT c7 in death-cam frames where there is
+		// no gun pass at all (dhp_seen stays false the whole frame). v35.8
+		// alone rejects those, leaving the HUD un-mirrored during the entire
+		// ~3-second death animation. Discriminator:
+		//   damage early c7 : prev_dhp=true,  this_dhp=false at c7 -> REJECT
+		//   death cam   c7  : prev_dhp=false, this_dhp=false at c7 -> ACCEPT
+		//   normal      c7  : this_dhp=true (gun rendered) -> ACCEPT (v35.8)
+		static bool g_dhp_seen_prev_frame           = false;
 		// v35.11: full per-frame counters for dhp / segment / inject events
 		// (the v35.8/v35.10 booleans were too coarse to detect anomalies).
 		static int  g_dhp_count_this_frame          = 0;
@@ -1095,6 +1105,9 @@ namespace components
 		// HUD draws until mirror_rtt::final_composite has actually run
 		// for this frame (or rtt is disabled, see ALPHATESTENABLE hook).
 		mirror_rtt::g_final_composite_done_this_frame = false;
+		// v35.12: latch previous-frame dhp_seen BEFORE we clear this-frame.
+		// Read by mirror_hud c7 arming gate to relax v35.8 in death cam.
+		mirror_rtt::g_dhp_seen_prev_frame = mirror_rtt::g_dhp_seen_this_frame;
 		// v35.8: clear the per-frame "dhp seen" latch. Set at SVP when
 		// the engine first uploads a depth-hack-projection (gun) matrix.
 		mirror_rtt::g_dhp_seen_this_frame = false;
@@ -1283,7 +1296,7 @@ namespace components
 				"[hudlog] f=%u SUMMARY c7=%d armed=%d reject=%d fire=%d beg=%d comp=%d "
 				"dhp=%d final=%d hud_act=%d late_dhp=%d rt=%d "
 				"inj_fail=%d early_comp=%d comp_in_hud=%d draws_in_hud=%d mtx64_in_hud=%d "
-				"dhp_n=%d bsg=%d esg=%d inj=%d/%d follow_end=%d pass_end=%d\n",
+				"dhp_n=%d bsg=%d esg=%d inj=%d/%d follow_end=%d pass_end=%d prev_dhp=%d\n",
 				s_hudlog_frame,
 				mirror_hud::g_c7_match_this_frame,
 				mirror_hud::g_c7_armed_this_frame,
@@ -1307,7 +1320,8 @@ namespace components
 				mirror_rtt::g_inject_ok_count_this_frame,
 				mirror_rtt::g_inject_calls_this_frame,
 				_renderer::mirror_vscf_follow_remaining,
-				(int)mirror_rtt::g_pass_active), 0);
+				(int)mirror_rtt::g_pass_active,
+				(int)mirror_rtt::g_dhp_seen_prev_frame), 0);
 		}
 
 		if (_renderer::mirror_dump_frames_remaining > 0)
@@ -1873,6 +1887,19 @@ namespace components
 					(int)mirror_rtt::g_final_composite_done_this_frame,
 					mirror_hud::g_c7_match_this_frame,
 					mirror_hud::g_c7_rejected_this_frame), 0);
+				// v35.12: dump first dhp matrix diagonal + first column to detect
+				// horizontal flip (negative c0[0] would mean engine pre-flipped
+				// the gun matrix, which combined with our inject UV-flip would
+				// produce un-mirrored gun on BB during damage flinch).
+				game::Com_PrintMessage(0, utils::va(
+					"[hudlog] f=%u dhp_mtx c0=(%.4f %.4f %.4f %.4f) c1[1]=%.4f c2[2]=%.4f c2[3]=%.4f c3=(%.4f %.4f %.4f %.4f)\n",
+					s_hudlog_frame,
+					pConstantData[0],  pConstantData[1],  pConstantData[2],  pConstantData[3],
+					pConstantData[5],
+					pConstantData[10],
+					pConstantData[11],
+					pConstantData[12], pConstantData[13], pConstantData[14], pConstantData[15]
+				), 0);
 			}
 
 			// v35.9 diagnostic: dhp uploads that arrive AFTER mirror_hud
@@ -2260,7 +2287,15 @@ namespace components
 				if (is_pre_hud_signal) {
 					++mirror_hud::g_pscf_hits_this_frame;
 					++mirror_hud::g_c7_match_this_frame;
-					const bool armed_now = mirror_rtt::g_dhp_seen_this_frame;
+					// v35.12: arm if (a) gun pass already happened this frame
+					// (v35.8 normal case), OR (b) previous frame also had no
+					// gun pass (sustained death cam: 3rd-person view, no
+					// viewmodel ever uploads dhp). Damage-flash early c7
+					// (prev frame had gun, current dhp not yet seen) is still
+					// rejected because the real post-FX c7 will arm shortly.
+					const bool armed_now =
+						mirror_rtt::g_dhp_seen_this_frame ||
+						!mirror_rtt::g_dhp_seen_prev_frame;
 					if (armed_now) {
 						mirror_hud::g_capture_armed = true;
 						++mirror_hud::g_c7_armed_this_frame;
@@ -2274,9 +2309,10 @@ namespace components
 					if (hudlog_level() >= 2)
 					{
 						game::Com_PrintMessage(0, utils::va(
-							"[hudlog] f=%u c7_match c=(%.6f %.6f %.6f %.6f) dhp_seen=%d -> %s\n",
+							"[hudlog] f=%u c7_match c=(%.6f %.6f %.6f %.6f) dhp_seen=%d prev_dhp=%d -> %s\n",
 							s_hudlog_frame, c70, c71, c72, c73,
 							(int)mirror_rtt::g_dhp_seen_this_frame,
+							(int)mirror_rtt::g_dhp_seen_prev_frame,
 							armed_now ? "ARMED" : "REJECTED"), 0);
 					}
 				}
