@@ -736,6 +736,7 @@ namespace components
 		// is true, any Draw[Indexed]Primitive issued with a non-null
 		// vertex or pixel shader is redirected to g_saved_color (BB)
 		// for the duration of that single draw, then HUD-RTT is re-bound.
+		static bool g_last_tex0_is_big_rt                   = false; // v35.15
 		static bool g_last_vs_nonnull                       = false;
 		static bool g_last_ps_nonnull                       = false;
 		static int  g_shader_escapes_this_frame             = 0;
@@ -1662,6 +1663,26 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetTexture(DWORD Stage, IDirect3DBaseTexture9* pTexture)
 	{
+		// v35.15: classify stage-0 texture as 'big RT' (e.g. scene RT used
+		// by the damage/death post-FX pass). Drives the narrowed shader-
+		// escape in Draw[Indexed]Primitive. Normal HUD textures are
+		// DXT5 D3DUSAGE_DYNAMIC (0x200) so this stays false during HUD.
+		if (Stage == 0)
+		{
+			bool is_big_rt = false;
+			if (pTexture && pTexture->GetType() == D3DRTYPE_TEXTURE)
+			{
+				IDirect3DTexture9* tex2d = static_cast<IDirect3DTexture9*>(pTexture);
+				D3DSURFACE_DESC sd = {};
+				if (SUCCEEDED(tex2d->GetLevelDesc(0, &sd))
+					&& sd.Width >= 512u
+					&& (sd.Usage & D3DUSAGE_RENDERTARGET) != 0)
+				{
+					is_big_rt = true;
+				}
+			}
+			mirror_hud::g_last_tex0_is_big_rt = is_big_rt;
+		}
 		// v35.13: detect fullscreen-textured quads landing in HUD-RTT.
 		// In death cam the killcam preview / scene-image overlay can
 		// arrive between begin_capture and the real HUD draws; UV-flipped
@@ -1776,20 +1797,22 @@ namespace components
 			++mirror_hud::g_draws_during_hud_this_frame;
 			if (PrimitiveCount >= 64) ++mirror_hud::g_big_prim_in_hud_this_frame; // v35.13
 		}
-		// v35.14: shader-draw escape. When a draw inside the HUD-RTT
-		// capture window uses a non-null VS or PS, it's a post-FX /
-		// 3D draw (confirmed by v35.13 log); redirect it to the saved
-		// BB so composite() won't UV-flip it onto the screen.
+		// v35.15: narrowed escape -- only redirect draws that sample a
+		// large RENDERTARGET texture at stage 0 (the post-FX scene RT).
+		// v35.14 used (vs_nonnull || ps_nonnull) which also matched HUD
+		// draws in this engine (shader set before begin_capture), so the
+		// entire HUD was bypassed -> HUD mirror broke. The RT-texture
+		// signal is exclusive to damage/death post-FX in v35.13 log.
 		const bool v35_14_escape_dp =
 			mirror_hud::g_active
-			&& (mirror_hud::g_last_vs_nonnull || mirror_hud::g_last_ps_nonnull)
+			&& mirror_hud::g_last_tex0_is_big_rt
 			&& mirror_hud::g_saved_color;
 		if (v35_14_escape_dp) {
 			++mirror_hud::g_shader_escapes_this_frame;
 			if (!mirror_hud::g_logged_first_shader_escape_this_frame && hudlog_level() >= 2) {
 				mirror_hud::g_logged_first_shader_escape_this_frame = true;
 				game::Com_PrintMessage(0, utils::va(
-					"[hudlog] f=%u shader_escape kind=dp prim=%u vs=%d ps=%d\n",
+					"[hudlog] f=%u shader_escape kind=dp prim=%u vs=%d ps=%d tex0_rt=1\n",
 					s_hudlog_frame, PrimitiveCount,
 					(int)mirror_hud::g_last_vs_nonnull,
 					(int)mirror_hud::g_last_ps_nonnull), 0);
@@ -1843,17 +1866,19 @@ namespace components
 			++mirror_hud::g_draws_during_hud_this_frame; // v35.10
 			if (primCount >= 64) ++mirror_hud::g_big_prim_in_hud_this_frame; // v35.13
 		}
-		// v35.14: shader-draw escape (see DrawPrimitive comment).
+		// v35.15: narrowed escape (see DrawPrimitive comment). Only
+		// redirect draws that sample a large RENDERTARGET texture at
+		// stage 0 -- the post-FX scene RT signature.
 		const bool v35_14_escape_dip =
 			mirror_hud::g_active
-			&& (mirror_hud::g_last_vs_nonnull || mirror_hud::g_last_ps_nonnull)
+			&& mirror_hud::g_last_tex0_is_big_rt
 			&& mirror_hud::g_saved_color;
 		if (v35_14_escape_dip) {
 			++mirror_hud::g_shader_escapes_this_frame;
 			if (!mirror_hud::g_logged_first_shader_escape_this_frame && hudlog_level() >= 2) {
 				mirror_hud::g_logged_first_shader_escape_this_frame = true;
 				game::Com_PrintMessage(0, utils::va(
-					"[hudlog] f=%u shader_escape kind=dip prim=%u nverts=%u vs=%d ps=%d\n",
+					"[hudlog] f=%u shader_escape kind=dip prim=%u nverts=%u vs=%d ps=%d tex0_rt=1\n",
 					s_hudlog_frame, primCount, NumVertices,
 					(int)mirror_hud::g_last_vs_nonnull,
 					(int)mirror_hud::g_last_ps_nonnull), 0);
