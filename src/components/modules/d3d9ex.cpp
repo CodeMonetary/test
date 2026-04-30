@@ -700,59 +700,37 @@ namespace components
 		static int  g_comp_during_hud_this_frame     = 0; // final_composite ran while HUD-RTT was bound (g_active=true)
 		static int  g_draws_during_hud_this_frame    = 0; // Draw[Indexed]Primitive while g_active=true (post-capture rendering volume)
 		static int  g_mtx_flipreg_during_hud_this_frame = 0; // VSCF 4-row matrix upload at flipReg while g_active=true (suspected gun re-render)
-		// v35.13: per-frame markers for non-HUD content captured into HUD-RTT.
-		// Used to find the death-cam world-flip bug: with v35.12 the c7 gate
-		// now arms in death cam, so begin_capture starts the HUD-RTT capture.
-		// If a fullscreen-textured quad (e.g. killcam preview, scene-image
-		// overlay) or a 3D-shaded draw lands inside the begin_capture..
-		// composite window it ends up UV-flipped onto BB by composite() and
-		// looks like "the world flipped".
-		static int  g_big_tex_in_hud_this_frame      = 0; // SetTexture(stage=0) with width>=512 while g_active (likely fullscreen content)
-		static int  g_vshader_in_hud_this_frame      = 0; // SetVertexShader(non-null) while g_active (3D content marker)
-		static int  g_pshader_in_hud_this_frame      = 0; // SetPixelShader(non-null) while g_active (3D shader marker)
-		static int  g_big_prim_in_hud_this_frame     = 0; // Draw[Indexed]Primitive primCount>=64 while g_active (large mesh)
-		// v35.13: latched first-occurrence flags so we log the smoking-gun
-		// event ONCE per frame instead of every draw call.
-		static bool g_logged_first_big_tex_this_frame = false;
-		static bool g_logged_first_vshader_this_frame = false;
-		static bool g_logged_first_pshader_this_frame = false;
-
-		// v35.14: shader-draw escape mechanism for HUD-RTT.
-		//
-		// v35.13 log showed that during the damage flash / death cam a
-		// fullscreen post-FX draw runs BETWEEN begin_capture and the
-		// first real HUD draw:
-		//   - stage-0 texture = 1280x720 A8R8G8B8 RENDERTARGET (scene)
-		//   - SetVertexShader + SetPixelShader both non-null
-		//   - 1 fullscreen-quad DrawPrimitive
-		// With HUD-RTT bound that quad writes INTO HUD-RTT; composite()
-		// then horizontally flips HUD-RTT onto BB so the sampled scene
-		// appears mirrored (the "world flip" bug) for ~42 frames per
-		// event.
-		//
-		// Normal HUD draws always use the FFP (null VS AND null PS):
-		// vsh=0 psh=0 across 2208 non-bug frames vs vsh=2 psh=2 in 84
-		// bug frames in the v35.13 log -> reliable signal. While g_active
-		// is true, any Draw[Indexed]Primitive issued with a non-null
-		// vertex or pixel shader is redirected to g_saved_color (BB)
-		// for the duration of that single draw, then HUD-RTT is re-bound.
-		static bool g_last_tex0_is_big_rt                   = false; // v35.15
-		static bool g_last_vs_nonnull                       = false;
-		static bool g_last_ps_nonnull                       = false;
+		// v35.15: shader-draw escape mechanism for HUD-RTT.
+		// During the damage flash / death cam a fullscreen post-FX
+		// draw can run between begin_capture and the first real HUD
+		// draw. With HUD-RTT bound that quad would write INTO HUD-RTT;
+		// composite() then UV-flips HUD-RTT onto BB so the sampled
+		// scene appears mirrored (the world-flip bug). The escape
+		// detects this draw via the stage-0 texture (a large render-
+		// target sized >= 512) and redirects it to g_saved_color (BB)
+		// for the duration of that single draw, then HUD-RTT is
+		// re-bound.
+		static bool g_last_tex0_is_big_rt                   = false;
 		static int  g_shader_escapes_this_frame             = 0;
 		static bool g_logged_first_shader_escape_this_frame = false;
-		// v35.18: dump device blend / alpha / color-write state at the
-		// first custom-shader draw inside the HUD-RTT window. Used to
-		// identify how the killstreak / nickname outline shader is
-		// configured so we can match its visual exactly when rendering
-		// into HUD-RTT (currently the outline appears bolder than the
-		// direct-to-BB version at r_hudMirror=0).
-		static bool g_logged_first_outline_state_this_frame = false;
-		// v35.19: number of D3DRS_SRCBLENDALPHA / DESTBLENDALPHA overrides
-		// applied this frame inside the HUD-RTT capture window (see
-		// SetRenderState hook). Expected ~ vsh/psh frame count when the
-		// killstreak / nickname outline shader is rendering.
-		static int  g_alpha_blend_overrides_this_frame      = 0;
+
+		// KNOWN LIMITATION: at r_hudMirror=1 the killstreak / nickname
+		// outline shader (custom VS+PS, sabe=TRUE, srca=INVDESTALPHA,
+		// dsta=ZERO, stencil disabled) renders into HUD-RTT with a
+		// visibly bolder dark outline than at r_hudMirror=0. Three
+		// alpha-math fix attempts (v35.16 SEPARATEALPHABLENDENABLE
+		// global, v35.19 SetRenderState alpha-factor override, v35.20
+		// per-draw alpha-factor force) all failed: v35.20 did fire on
+		// every outline draw (43-68/frame in user log) but produced
+		// no visible change, and v35.16 / v35.20 also leaked state
+		// into world / gun rendering and broke weapon visibility
+		// during fire. v35.21 stencil hypothesis was also refuted by
+		// log (STENCILENABLE=0 in all 983 outline draws). The visible
+		// difference is probably caused by a stage>0 sampler or a
+		// shader constant that depends on RT identity, but verifying
+		// would require deeply invasive shader-resource inspection.
+		// Current behaviour kept: full HUD mirror including outline
+		// text, with cosmetic bolder outline as a known limitation.
 
 		static void release_targets()
 		{
@@ -1196,17 +1174,8 @@ namespace components
 		mirror_hud::g_comp_during_hud_this_frame      = 0;
 		mirror_hud::g_draws_during_hud_this_frame     = 0;
 		mirror_hud::g_mtx_flipreg_during_hud_this_frame = 0;
-		mirror_hud::g_big_tex_in_hud_this_frame       = 0; // v35.13
-		mirror_hud::g_vshader_in_hud_this_frame       = 0; // v35.13
-		mirror_hud::g_pshader_in_hud_this_frame       = 0; // v35.13
-		mirror_hud::g_big_prim_in_hud_this_frame      = 0; // v35.13
-		mirror_hud::g_logged_first_big_tex_this_frame = false; // v35.13
-		mirror_hud::g_logged_first_vshader_this_frame = false; // v35.13
-		mirror_hud::g_logged_first_pshader_this_frame = false; // v35.13
-		mirror_hud::g_shader_escapes_this_frame              = 0;     // v35.14
-		mirror_hud::g_logged_first_shader_escape_this_frame  = false; // v35.14
-		mirror_hud::g_logged_first_outline_state_this_frame  = false; // v35.18
-		mirror_hud::g_alpha_blend_overrides_this_frame       = 0;     // v35.19
+		mirror_hud::g_shader_escapes_this_frame              = 0;     // v35.15
+		mirror_hud::g_logged_first_shader_escape_this_frame  = false; // v35.15
 
 		++s_hudlog_frame;
 
@@ -1361,7 +1330,7 @@ namespace components
 				"dhp=%d final=%d hud_act=%d late_dhp=%d rt=%d "
 				"inj_fail=%d early_comp=%d comp_in_hud=%d draws_in_hud=%d mtx64_in_hud=%d "
 				"dhp_n=%d bsg=%d esg=%d inj=%d/%d follow_end=%d pass_end=%d prev_dhp=%d "
-				"bigtex=%d vsh=%d psh=%d bigprim=%d esc=%d ablend_ovr=%d\n",
+				"esc=%d\n",
 				s_hudlog_frame,
 				mirror_hud::g_c7_match_this_frame,
 				mirror_hud::g_c7_armed_this_frame,
@@ -1387,12 +1356,7 @@ namespace components
 				_renderer::mirror_vscf_follow_remaining,
 				(int)mirror_rtt::g_pass_active,
 				(int)mirror_rtt::g_dhp_seen_prev_frame,
-				mirror_hud::g_big_tex_in_hud_this_frame,    // v35.13
-				mirror_hud::g_vshader_in_hud_this_frame,    // v35.13
-				mirror_hud::g_pshader_in_hud_this_frame,    // v35.13
-				mirror_hud::g_big_prim_in_hud_this_frame,   // v35.13
-				mirror_hud::g_shader_escapes_this_frame,    // v35.14
-				mirror_hud::g_alpha_blend_overrides_this_frame), // v35.19
+				mirror_hud::g_shader_escapes_this_frame),   // v35.15
 				0);
 		}
 
@@ -1705,32 +1669,6 @@ namespace components
 			}
 			mirror_hud::g_last_tex0_is_big_rt = is_big_rt;
 		}
-		// v35.13: detect fullscreen-textured quads landing in HUD-RTT.
-		// In death cam the killcam preview / scene-image overlay can
-		// arrive between begin_capture and the real HUD draws; UV-flipped
-		// in composite() it looks like the world is mirrored.
-		if (mirror_hud::g_active && Stage == 0 && pTexture)
-		{
-			D3DRESOURCETYPE rt = pTexture->GetType();
-			if (rt == D3DRTYPE_TEXTURE)
-			{
-				IDirect3DTexture9* tex2d = static_cast<IDirect3DTexture9*>(pTexture);
-				D3DSURFACE_DESC sd = {};
-				if (SUCCEEDED(tex2d->GetLevelDesc(0, &sd)) && sd.Width >= 512u)
-				{
-					++mirror_hud::g_big_tex_in_hud_this_frame;
-					if (!mirror_hud::g_logged_first_big_tex_this_frame && hudlog_level() >= 2)
-					{
-						mirror_hud::g_logged_first_big_tex_this_frame = true;
-						game::Com_PrintMessage(0, utils::va(
-							"[hudlog] f=%u big_tex_in_hud stage=0 w=%u h=%u fmt=0x%X usage=0x%X pool=%d (n_so_far=%d)\n",
-							s_hudlog_frame, sd.Width, sd.Height, (unsigned)sd.Format,
-							(unsigned)sd.Usage, (int)sd.Pool,
-							mirror_hud::g_big_tex_in_hud_this_frame), 0);
-					}
-				}
-			}
-		}
 		return m_pIDirect3DDevice9->SetTexture(Stage, pTexture);
 	}
 
@@ -1817,78 +1755,7 @@ namespace components
 		// matrix uploads at flipReg would point at a stealth gun render.
 		if (mirror_hud::g_active) {
 			++mirror_hud::g_draws_during_hud_this_frame;
-			if (PrimitiveCount >= 64) ++mirror_hud::g_big_prim_in_hud_this_frame; // v35.13
 		}
-		// v35.18: dump blend/alpha state on the first non-FFP draw of
-		// the frame inside HUD-RTT (the killstreak/nickname outline
-		// shader is the only known producer of vsh/psh non-null draws
-		// in normal alive frames per v35.13 log).
-		if (mirror_hud::g_active
-			&& (mirror_hud::g_last_vs_nonnull || mirror_hud::g_last_ps_nonnull)
-			&& !mirror_hud::g_logged_first_outline_state_this_frame
-			&& hudlog_level() >= 2)
-		{
-			mirror_hud::g_logged_first_outline_state_this_frame = true;
-			DWORD rs_abe = 0, rs_src = 0, rs_dst = 0, rs_op = 0;
-			DWORD rs_sabe = 0, rs_srca = 0, rs_dsta = 0, rs_opa = 0;
-			DWORD rs_ate = 0, rs_aref = 0, rs_afn = 0;
-			DWORD rs_cwe = 0, rs_srgb = 0, rs_bf = 0;
-			DWORD rs_zen = 0, rs_zwe = 0, rs_cull = 0;
-			DWORD rs_stencil = 0, rs_sten_func = 0, rs_sten_ref = 0, rs_sten_mask = 0;
-			DWORD rs_sten_pass = 0, rs_sten_fail = 0, rs_sten_zfail = 0;
-			IDirect3DSurface9* cur_dsv = nullptr;
-			m_pIDirect3DDevice9->GetDepthStencilSurface(&cur_dsv);
-			const int has_dsv = cur_dsv ? 1 : 0;
-			if (cur_dsv) { cur_dsv->Release(); cur_dsv = nullptr; }
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILENABLE,            &rs_stencil);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILFUNC,              &rs_sten_func);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILREF,               &rs_sten_ref);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILMASK,              &rs_sten_mask);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILPASS,              &rs_sten_pass);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILFAIL,              &rs_sten_fail);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILZFAIL,             &rs_sten_zfail);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHABLENDENABLE,         &rs_abe);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRCBLEND,                 &rs_src);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_DESTBLEND,                &rs_dst);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_BLENDOP,                  &rs_op);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, &rs_sabe);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRCBLENDALPHA,            &rs_srca);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_DESTBLENDALPHA,           &rs_dsta);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_BLENDOPALPHA,             &rs_opa);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHATESTENABLE,          &rs_ate);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHAREF,                 &rs_aref);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHAFUNC,                &rs_afn);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_COLORWRITEENABLE,         &rs_cwe);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRGBWRITEENABLE,          &rs_srgb);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_BLENDFACTOR,              &rs_bf);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_ZENABLE,                  &rs_zen);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_ZWRITEENABLE,             &rs_zwe);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_CULLMODE,                 &rs_cull);
-			game::Com_PrintMessage(0, utils::va(
-				"[hudlog] f=%u outline_state kind=dp prim=%u vs=%d ps=%d tex0_rt=%d"
-				" abe=%u src=%u dst=%u op=%u"
-				" sabe=%u srca=%u dsta=%u opa=%u"
-				" ate=%u aref=%u afn=%u cwe=0x%X srgb=%u bf=0x%08X"
-				" zen=%u zwe=%u cull=%u"
-				" stenc=%u sfn=%u sref=%u smsk=0x%X spass=%u sfail=%u szfail=%u dsv=%d\n",
-				s_hudlog_frame, PrimitiveCount,
-				(int)mirror_hud::g_last_vs_nonnull,
-				(int)mirror_hud::g_last_ps_nonnull,
-				(int)mirror_hud::g_last_tex0_is_big_rt,
-				rs_abe, rs_src, rs_dst, rs_op,
-				rs_sabe, rs_srca, rs_dsta, rs_opa,
-				rs_ate, rs_aref, rs_afn, rs_cwe, rs_srgb, rs_bf,
-				rs_zen, rs_zwe, rs_cull,
-				rs_stencil, rs_sten_func, rs_sten_ref, rs_sten_mask,
-				rs_sten_pass, rs_sten_fail, rs_sten_zfail, has_dsv), 0);
-		}
-		// v35.21: v35.20 force-override removed -- it left state on the
-		// device (SRCBLENDALPHA=ONE / DESTBLENDALPHA=INVSRCALPHA) which
-		// leaked into world / gun rendering and made the weapon vanish
-		// during fire (same regression mode as v35.16). The override
-		// also produced no visible change to the outline -- alpha-math
-		// is not the root cause. New hypothesis: stencil. See v35.21
-		// outline_state log additions below.
 		// v35.15: narrowed escape -- only redirect draws that sample a
 		// large RENDERTARGET texture at stage 0 (the post-FX scene RT).
 		// v35.14 used (vs_nonnull || ps_nonnull) which also matched HUD
@@ -1904,10 +1771,8 @@ namespace components
 			if (!mirror_hud::g_logged_first_shader_escape_this_frame && hudlog_level() >= 2) {
 				mirror_hud::g_logged_first_shader_escape_this_frame = true;
 				game::Com_PrintMessage(0, utils::va(
-					"[hudlog] f=%u shader_escape kind=dp prim=%u vs=%d ps=%d tex0_rt=1\n",
-					s_hudlog_frame, PrimitiveCount,
-					(int)mirror_hud::g_last_vs_nonnull,
-					(int)mirror_hud::g_last_ps_nonnull), 0);
+					"[hudlog] f=%u shader_escape kind=dp prim=%u tex0_rt=1\n",
+					s_hudlog_frame, PrimitiveCount), 0);
 			}
 			m_pIDirect3DDevice9->SetRenderTarget(0, mirror_hud::g_saved_color);
 			if (mirror_hud::g_saved_depth)
@@ -1956,71 +1821,7 @@ namespace components
 	{
 		if (mirror_hud::g_active) {
 			++mirror_hud::g_draws_during_hud_this_frame; // v35.10
-			if (primCount >= 64) ++mirror_hud::g_big_prim_in_hud_this_frame; // v35.13
 		}
-		// v35.18: dump blend/alpha state on the first non-FFP draw of
-		// the frame inside HUD-RTT (the killstreak/nickname outline
-		// shader). Same as DrawPrimitive but kind=dip.
-		if (mirror_hud::g_active
-			&& (mirror_hud::g_last_vs_nonnull || mirror_hud::g_last_ps_nonnull)
-			&& !mirror_hud::g_logged_first_outline_state_this_frame
-			&& hudlog_level() >= 2)
-		{
-			mirror_hud::g_logged_first_outline_state_this_frame = true;
-			DWORD rs_abe = 0, rs_src = 0, rs_dst = 0, rs_op = 0;
-			DWORD rs_sabe = 0, rs_srca = 0, rs_dsta = 0, rs_opa = 0;
-			DWORD rs_ate = 0, rs_aref = 0, rs_afn = 0;
-			DWORD rs_cwe = 0, rs_srgb = 0, rs_bf = 0;
-			DWORD rs_zen = 0, rs_zwe = 0, rs_cull = 0;
-			DWORD rs_stencil = 0, rs_sten_func = 0, rs_sten_ref = 0, rs_sten_mask = 0;
-			DWORD rs_sten_pass = 0, rs_sten_fail = 0, rs_sten_zfail = 0;
-			IDirect3DSurface9* cur_dsv = nullptr;
-			m_pIDirect3DDevice9->GetDepthStencilSurface(&cur_dsv);
-			const int has_dsv = cur_dsv ? 1 : 0;
-			if (cur_dsv) { cur_dsv->Release(); cur_dsv = nullptr; }
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILENABLE,            &rs_stencil);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILFUNC,              &rs_sten_func);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILREF,               &rs_sten_ref);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILMASK,              &rs_sten_mask);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILPASS,              &rs_sten_pass);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILFAIL,              &rs_sten_fail);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILZFAIL,             &rs_sten_zfail);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHABLENDENABLE,         &rs_abe);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRCBLEND,                 &rs_src);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_DESTBLEND,                &rs_dst);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_BLENDOP,                  &rs_op);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, &rs_sabe);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRCBLENDALPHA,            &rs_srca);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_DESTBLENDALPHA,           &rs_dsta);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_BLENDOPALPHA,             &rs_opa);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHATESTENABLE,          &rs_ate);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHAREF,                 &rs_aref);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHAFUNC,                &rs_afn);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_COLORWRITEENABLE,         &rs_cwe);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRGBWRITEENABLE,          &rs_srgb);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_BLENDFACTOR,              &rs_bf);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_ZENABLE,                  &rs_zen);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_ZWRITEENABLE,             &rs_zwe);
-			m_pIDirect3DDevice9->GetRenderState(D3DRS_CULLMODE,                 &rs_cull);
-			game::Com_PrintMessage(0, utils::va(
-				"[hudlog] f=%u outline_state kind=dip prim=%u nverts=%u vs=%d ps=%d tex0_rt=%d"
-				" abe=%u src=%u dst=%u op=%u"
-				" sabe=%u srca=%u dsta=%u opa=%u"
-				" ate=%u aref=%u afn=%u cwe=0x%X srgb=%u bf=0x%08X"
-				" zen=%u zwe=%u cull=%u"
-				" stenc=%u sfn=%u sref=%u smsk=0x%X spass=%u sfail=%u szfail=%u dsv=%d\n",
-				s_hudlog_frame, primCount, NumVertices,
-				(int)mirror_hud::g_last_vs_nonnull,
-				(int)mirror_hud::g_last_ps_nonnull,
-				(int)mirror_hud::g_last_tex0_is_big_rt,
-				rs_abe, rs_src, rs_dst, rs_op,
-				rs_sabe, rs_srca, rs_dsta, rs_opa,
-				rs_ate, rs_aref, rs_afn, rs_cwe, rs_srgb, rs_bf,
-				rs_zen, rs_zwe, rs_cull,
-				rs_stencil, rs_sten_func, rs_sten_ref, rs_sten_mask,
-				rs_sten_pass, rs_sten_fail, rs_sten_zfail, has_dsv), 0);
-		}
-		// v35.21: v35.20 force-override removed (see DrawPrimitive note).
 		// v35.15: narrowed escape (see DrawPrimitive comment). Only
 		// redirect draws that sample a large RENDERTARGET texture at
 		// stage 0 -- the post-FX scene RT signature.
@@ -2033,10 +1834,8 @@ namespace components
 			if (!mirror_hud::g_logged_first_shader_escape_this_frame && hudlog_level() >= 2) {
 				mirror_hud::g_logged_first_shader_escape_this_frame = true;
 				game::Com_PrintMessage(0, utils::va(
-					"[hudlog] f=%u shader_escape kind=dip prim=%u nverts=%u vs=%d ps=%d tex0_rt=1\n",
-					s_hudlog_frame, primCount, NumVertices,
-					(int)mirror_hud::g_last_vs_nonnull,
-					(int)mirror_hud::g_last_ps_nonnull), 0);
+					"[hudlog] f=%u shader_escape kind=dip prim=%u nverts=%u tex0_rt=1\n",
+					s_hudlog_frame, primCount, NumVertices), 0);
 			}
 			m_pIDirect3DDevice9->SetRenderTarget(0, mirror_hud::g_saved_color);
 			if (mirror_hud::g_saved_depth)
@@ -2131,23 +1930,6 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetVertexShader(IDirect3DVertexShader9* pShader)
 	{
-		// v35.14: track last non-null state for shader-draw escape in Draw hooks.
-		mirror_hud::g_last_vs_nonnull = (pShader != nullptr);
-		// v35.13: HUD draws use null vertex shader (FFP). A non-null vertex
-		// shader inside the begin_capture..composite window means a 3D-style
-		// draw is landing in HUD-RTT (suspected world / killcam content).
-		if (mirror_hud::g_active && pShader)
-		{
-			++mirror_hud::g_vshader_in_hud_this_frame;
-			if (!mirror_hud::g_logged_first_vshader_this_frame && hudlog_level() >= 2)
-			{
-				mirror_hud::g_logged_first_vshader_this_frame = true;
-				game::Com_PrintMessage(0, utils::va(
-					"[hudlog] f=%u vshader_in_hud first ptr=%p draws_so_far=%d\n",
-					s_hudlog_frame, (void*)pShader,
-					mirror_hud::g_draws_during_hud_this_frame), 0);
-			}
-		}
 		return m_pIDirect3DDevice9->SetVertexShader(pShader);
 	}
 
@@ -2452,23 +2234,6 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetPixelShader(IDirect3DPixelShader9* pShader)
 	{
-		// v35.14: track last non-null state for shader-draw escape in Draw hooks.
-		mirror_hud::g_last_ps_nonnull = (pShader != nullptr);
-		// v35.13: HUD draws use null pixel shader (FFP). A non-null pixel
-		// shader inside the begin_capture..composite window means a shaded
-		// 3D draw is landing in HUD-RTT (suspected world / killcam content).
-		if (mirror_hud::g_active && pShader)
-		{
-			++mirror_hud::g_pshader_in_hud_this_frame;
-			if (!mirror_hud::g_logged_first_pshader_this_frame && hudlog_level() >= 2)
-			{
-				mirror_hud::g_logged_first_pshader_this_frame = true;
-				game::Com_PrintMessage(0, utils::va(
-					"[hudlog] f=%u pshader_in_hud first ptr=%p draws_so_far=%d\n",
-					s_hudlog_frame, (void*)pShader,
-					mirror_hud::g_draws_during_hud_this_frame), 0);
-			}
-		}
 		return m_pIDirect3DDevice9->SetPixelShader(pShader);
 	}
 
