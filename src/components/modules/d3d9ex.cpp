@@ -1834,6 +1834,19 @@ namespace components
 			DWORD rs_ate = 0, rs_aref = 0, rs_afn = 0;
 			DWORD rs_cwe = 0, rs_srgb = 0, rs_bf = 0;
 			DWORD rs_zen = 0, rs_zwe = 0, rs_cull = 0;
+			DWORD rs_stencil = 0, rs_sten_func = 0, rs_sten_ref = 0, rs_sten_mask = 0;
+			DWORD rs_sten_pass = 0, rs_sten_fail = 0, rs_sten_zfail = 0;
+			IDirect3DSurface9* cur_dsv = nullptr;
+			m_pIDirect3DDevice9->GetDepthStencilSurface(&cur_dsv);
+			const int has_dsv = cur_dsv ? 1 : 0;
+			if (cur_dsv) { cur_dsv->Release(); cur_dsv = nullptr; }
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILENABLE,            &rs_stencil);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILFUNC,              &rs_sten_func);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILREF,               &rs_sten_ref);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILMASK,              &rs_sten_mask);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILPASS,              &rs_sten_pass);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILFAIL,              &rs_sten_fail);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILZFAIL,             &rs_sten_zfail);
 			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHABLENDENABLE,         &rs_abe);
 			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRCBLEND,                 &rs_src);
 			m_pIDirect3DDevice9->GetRenderState(D3DRS_DESTBLEND,                &rs_dst);
@@ -1856,7 +1869,8 @@ namespace components
 				" abe=%u src=%u dst=%u op=%u"
 				" sabe=%u srca=%u dsta=%u opa=%u"
 				" ate=%u aref=%u afn=%u cwe=0x%X srgb=%u bf=0x%08X"
-				" zen=%u zwe=%u cull=%u\n",
+				" zen=%u zwe=%u cull=%u"
+				" stenc=%u sfn=%u sref=%u smsk=0x%X spass=%u sfail=%u szfail=%u dsv=%d\n",
 				s_hudlog_frame, PrimitiveCount,
 				(int)mirror_hud::g_last_vs_nonnull,
 				(int)mirror_hud::g_last_ps_nonnull,
@@ -1864,28 +1878,17 @@ namespace components
 				rs_abe, rs_src, rs_dst, rs_op,
 				rs_sabe, rs_srca, rs_dsta, rs_opa,
 				rs_ate, rs_aref, rs_afn, rs_cwe, rs_srgb, rs_bf,
-				rs_zen, rs_zwe, rs_cull), 0);
+				rs_zen, rs_zwe, rs_cull,
+				rs_stencil, rs_sten_func, rs_sten_ref, rs_sten_mask,
+				rs_sten_pass, rs_sten_fail, rs_sten_zfail, has_dsv), 0);
 		}
-		// v35.20: force linear alpha-channel blend on outline-shader draws
-		// (vsh / psh non-null inside HUD-RTT). The engine's outline shader
-		// uses SRCBLENDALPHA=INVDESTALPHA / DESTBLENDALPHA=ZERO via a state
-		// block (so SetRenderState hook never sees it -- v35.19 ablend_ovr=0
-		// confirmed). That math wants dst.alpha=1 (back-buffer default),
-		// but HUD-RTT is cleared to alpha=0 so the alpha channel collapses
-		// to 0 and the outline ends up additively painted on the final
-		// back-buffer (visible as a bolder dark outline + tinted glyphs).
-		// Force ONE / INVSRCALPHA right here so alpha accumulates linearly
-		// and the final ONE/INVSRCALPHA composite reproduces direct-to-BB
-		// blending exactly. SEPARATEALPHABLENDENABLE itself is whatever
-		// the engine set (TRUE for outline draws); we only retarget the
-		// alpha factors. HUD draws with sabe=FALSE ignore them.
-		if (mirror_hud::g_active
-			&& (mirror_hud::g_last_vs_nonnull || mirror_hud::g_last_ps_nonnull))
-		{
-			m_pIDirect3DDevice9->SetRenderState(D3DRS_SRCBLENDALPHA,  D3DBLEND_ONE);
-			m_pIDirect3DDevice9->SetRenderState(D3DRS_DESTBLENDALPHA, D3DBLEND_INVSRCALPHA);
-			++mirror_hud::g_alpha_blend_overrides_this_frame;
-		}
+		// v35.21: v35.20 force-override removed -- it left state on the
+		// device (SRCBLENDALPHA=ONE / DESTBLENDALPHA=INVSRCALPHA) which
+		// leaked into world / gun rendering and made the weapon vanish
+		// during fire (same regression mode as v35.16). The override
+		// also produced no visible change to the outline -- alpha-math
+		// is not the root cause. New hypothesis: stencil. See v35.21
+		// outline_state log additions below.
 		// v35.15: narrowed escape -- only redirect draws that sample a
 		// large RENDERTARGET texture at stage 0 (the post-FX scene RT).
 		// v35.14 used (vs_nonnull || ps_nonnull) which also matched HUD
@@ -1969,6 +1972,19 @@ namespace components
 			DWORD rs_ate = 0, rs_aref = 0, rs_afn = 0;
 			DWORD rs_cwe = 0, rs_srgb = 0, rs_bf = 0;
 			DWORD rs_zen = 0, rs_zwe = 0, rs_cull = 0;
+			DWORD rs_stencil = 0, rs_sten_func = 0, rs_sten_ref = 0, rs_sten_mask = 0;
+			DWORD rs_sten_pass = 0, rs_sten_fail = 0, rs_sten_zfail = 0;
+			IDirect3DSurface9* cur_dsv = nullptr;
+			m_pIDirect3DDevice9->GetDepthStencilSurface(&cur_dsv);
+			const int has_dsv = cur_dsv ? 1 : 0;
+			if (cur_dsv) { cur_dsv->Release(); cur_dsv = nullptr; }
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILENABLE,            &rs_stencil);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILFUNC,              &rs_sten_func);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILREF,               &rs_sten_ref);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILMASK,              &rs_sten_mask);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILPASS,              &rs_sten_pass);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILFAIL,              &rs_sten_fail);
+			m_pIDirect3DDevice9->GetRenderState(D3DRS_STENCILZFAIL,             &rs_sten_zfail);
 			m_pIDirect3DDevice9->GetRenderState(D3DRS_ALPHABLENDENABLE,         &rs_abe);
 			m_pIDirect3DDevice9->GetRenderState(D3DRS_SRCBLEND,                 &rs_src);
 			m_pIDirect3DDevice9->GetRenderState(D3DRS_DESTBLEND,                &rs_dst);
@@ -1991,7 +2007,8 @@ namespace components
 				" abe=%u src=%u dst=%u op=%u"
 				" sabe=%u srca=%u dsta=%u opa=%u"
 				" ate=%u aref=%u afn=%u cwe=0x%X srgb=%u bf=0x%08X"
-				" zen=%u zwe=%u cull=%u\n",
+				" zen=%u zwe=%u cull=%u"
+				" stenc=%u sfn=%u sref=%u smsk=0x%X spass=%u sfail=%u szfail=%u dsv=%d\n",
 				s_hudlog_frame, primCount, NumVertices,
 				(int)mirror_hud::g_last_vs_nonnull,
 				(int)mirror_hud::g_last_ps_nonnull,
@@ -1999,18 +2016,11 @@ namespace components
 				rs_abe, rs_src, rs_dst, rs_op,
 				rs_sabe, rs_srca, rs_dsta, rs_opa,
 				rs_ate, rs_aref, rs_afn, rs_cwe, rs_srgb, rs_bf,
-				rs_zen, rs_zwe, rs_cull), 0);
+				rs_zen, rs_zwe, rs_cull,
+				rs_stencil, rs_sten_func, rs_sten_ref, rs_sten_mask,
+				rs_sten_pass, rs_sten_fail, rs_sten_zfail, has_dsv), 0);
 		}
-		// v35.20: force linear alpha-channel blend on outline-shader draws
-		// (see DrawPrimitive comment for why -- bypasses engine state
-		// block by setting the values immediately before the draw).
-		if (mirror_hud::g_active
-			&& (mirror_hud::g_last_vs_nonnull || mirror_hud::g_last_ps_nonnull))
-		{
-			m_pIDirect3DDevice9->SetRenderState(D3DRS_SRCBLENDALPHA,  D3DBLEND_ONE);
-			m_pIDirect3DDevice9->SetRenderState(D3DRS_DESTBLENDALPHA, D3DBLEND_INVSRCALPHA);
-			++mirror_hud::g_alpha_blend_overrides_this_frame;
-		}
+		// v35.21: v35.20 force-override removed (see DrawPrimitive note).
 		// v35.15: narrowed escape (see DrawPrimitive comment). Only
 		// redirect draws that sample a large RENDERTARGET texture at
 		// stage 0 -- the post-FX scene RT signature.
