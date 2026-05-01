@@ -2035,6 +2035,29 @@ volatile bool _renderer::gun_seen_this_present = false;
 			/* maxVal	*/ 2,
 			/* flags	*/ game::dvar_flags::saved);
 
+		// v36: companion dvar for r_fullMirror that also horizontally flips
+		// the engine main depth-stencil after each back-buffer flip. ReShade's
+		// Generic Depth addon hijacks D3D9 CreateDepthStencilSurface and
+		// substitutes D24S8 with INTZ so MXAO/SSAO can sample depth as a
+		// texture. r_fullMirror only flips back-buffer COLOR; the depth read
+		// by ReShade stays in the original (non-mirrored) orientation, so AO
+		// gets computed on the original geometry and applied on the already-
+		// flipped color -- producing visible "ghost" shadows at mirror-wrong
+		// positions (e.g. faint gun outline floating on a wall). When this
+		// dvar is enabled, after every fullscreen color flip we also do a
+		// 2-pass pixel-shader pass that flips the main DSV horizontally so
+		// ReShade reads depth that matches the visible color and MXAO/SSAO
+		// occlusion lands at the correct positions. No-op when the main DSV
+		// is not INTZ (i.e. ReShade Generic Depth not active or unsupported
+		// by the driver) -- safe to leave on by default.
+		dvars::r_fullMirrorDepth = game::Dvar_RegisterInt(
+			/* name		*/ "r_fullMirrorDepth",
+			/* desc		*/ "v36: also horizontally flip the engine main depth-stencil after each r_fullMirror back-buffer flip so ReShade MXAO/SSAO (which samples depth via Generic Depth INTZ-hijack) computes occlusion in the mirrored coordinate space and AO lands at the correct positions on the flipped color. No-op if main DSV is not INTZ (ReShade Generic Depth not active). 0 = off. 1 = on (default).",
+			/* default	*/ 1,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 1,
+			/* flags	*/ game::dvar_flags::saved);
+
 		// v33: ported from cod4mirror — fix MXAO/SSAO bleed-through on the
 		// mirrored gun. ReShade's MXAO samples the engine main depth-stencil
 		// to compute ambient occlusion. With r_mirrorViewmodel_rtt=1 the
