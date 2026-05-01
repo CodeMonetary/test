@@ -1638,10 +1638,13 @@ namespace components
 				? dvars::r_fullMirror->current.integer : 0;
 			if (full_mirror_eos == 2)
 			{
-				mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
-				// v36: also flip main DSV so ReShade MXAO/SSAO reads
-				// depth that matches the visible (flipped) color.
-				mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
+				// v36: only flip main DSV when the color flip itself succeeded.
+				// If the color flip failed, leaving depth untouched keeps color
+				// and depth in sync (same orientation as before this frame).
+				if (mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9))
+				{
+					mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
+				}
 			}
 		}
 
@@ -2052,12 +2055,14 @@ namespace components
 		if (mirror_rtt::g_pending_fullmirror_flip)
 		{
 			mirror_rtt::g_pending_fullmirror_flip = false;
-			mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
-			// v36: also flip main DSV so ReShade MXAO/SSAO reads depth
-			// that matches the visible (flipped) color. HUD draws after
-			// this point but uses ZENABLE=FALSE, so flipping main DSV
-			// here is safe.
-			mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
+			// v36: only flip main DSV when the color flip itself succeeded.
+			// If the color flip failed, leaving depth untouched keeps color
+			// and depth in sync. HUD draws after this point but uses
+			// ZENABLE=FALSE, so flipping main DSV here is safe.
+			if (mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9))
+			{
+				mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
+			}
 		}
 		// v35.2: HUD-RTT capture is no longer fired from DrawPrimitive.
 		// PSCF c7 only ARMS capture; the actual fire is deferred to the
@@ -2123,12 +2128,14 @@ namespace components
 		if (mirror_rtt::g_pending_fullmirror_flip)
 		{
 			mirror_rtt::g_pending_fullmirror_flip = false;
-			mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
-			// v36: also flip main DSV so ReShade MXAO/SSAO reads depth
-			// that matches the visible (flipped) color. HUD draws after
-			// this point but uses ZENABLE=FALSE, so flipping main DSV
-			// here is safe.
-			mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
+			// v36: only flip main DSV when the color flip itself succeeded.
+			// If the color flip failed, leaving depth untouched keeps color
+			// and depth in sync. HUD draws after this point but uses
+			// ZENABLE=FALSE, so flipping main DSV here is safe.
+			if (mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9))
+			{
+				mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
+			}
 		}
 		// v35.2: HUD-RTT capture is no longer fired from DrawIndexedPrimitive.
 		// PSCF c7 only ARMS capture; the actual fire is deferred to the
