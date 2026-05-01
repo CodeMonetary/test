@@ -609,6 +609,244 @@ namespace components
 			return ok;
 		}
 
+		// ----------------------------------------------------------------
+		// v36: main depth-stencil horizontal flip companion to do_fullscreen_flip.
+		//
+		// Problem. r_fullMirror only flips back-buffer COLOR via StretchRect +
+		// UV-flipped fullscreen quad. The engine main depth-stencil stays in
+		// its original orientation. ReShade Generic Depth (D3D9 path) hijacks
+		// CreateDepthStencilSurface and substitutes D24S8 with the FOURCC INTZ
+		// format so MXAO/SSAO can sample depth as a texture. With non-flipped
+		// depth and flipped color, MXAO computes ambient occlusion at the
+		// ORIGINAL geometry positions and applies darkening on top of the
+		// MIRRORED color -- producing visible "ghost" AO at mirror-wrong
+		// positions (e.g. faint gun outline floating on a wall).
+		//
+		// Fix. After every fullscreen color flip, also horizontally flip the
+		// engine main depth-stencil itself. Two passes are required because
+		// D3D9 disallows binding the same depth-stencil texture as both an
+		// input sampler and the output DSV in the same draw:
+		//
+		//   Pass 1: read main DSV's INTZ texture with FLIPPED UVs, output
+		//           depth into a scratch INTZ surface.
+		//   Pass 2: read scratch INTZ with STRAIGHT UVs, output depth back
+		//           into the main DSV. Main DSV now contains horizontally
+		//           flipped depth.
+		//
+		// ReShade EndScene/Present hook fires AFTER our wrapper's EndScene,
+		// so by the time ReShade samples depth for MXAO it sees the flipped
+		// version that matches the visible (flipped) color.
+		//
+		// No-op safety. If GetContainer on main DSV fails, or the parent
+		// texture's format is not INTZ (i.e. ReShade Generic Depth not loaded
+		// or running on a driver/path that does not perform the INTZ
+		// substitution), the function silently returns false and leaves depth
+		// untouched. r_fullMirrorDepth defaults to 1 -- safe to leave on.
+		// ----------------------------------------------------------------
+
+		static const D3DFORMAT FOURCC_INTZ = (D3DFORMAT)MAKEFOURCC('I','N','T','Z');
+
+		static IDirect3DTexture9*     g_depth_flip_intz = nullptr; // scratch INTZ for ping-pong
+		static IDirect3DSurface9*     g_depth_flip_surf = nullptr; // INTZ level-0 surface as DSV
+		static IDirect3DPixelShader9* g_depth_copy_ps   = nullptr; // ps_2_0: oDepth = sample.x
+		static int  g_depth_flip_w   = 0;
+		static int  g_depth_flip_h   = 0;
+		static bool g_depth_flip_ps_compile_failed = false; // sticky -- don't retry per frame
+
+		static void release_depth_flip_resources()
+		{
+			if (g_depth_flip_surf) { g_depth_flip_surf->Release(); g_depth_flip_surf = nullptr; }
+			if (g_depth_flip_intz) { g_depth_flip_intz->Release(); g_depth_flip_intz = nullptr; }
+			if (g_depth_copy_ps)   { g_depth_copy_ps->Release();   g_depth_copy_ps   = nullptr; }
+			g_depth_flip_w = g_depth_flip_h = 0;
+			g_depth_flip_ps_compile_failed = false;
+		}
+
+		static bool ensure_depth_flip_intz(IDirect3DDevice9* dev, UINT w, UINT h)
+		{
+			if (g_depth_flip_intz && (int)w == g_depth_flip_w && (int)h == g_depth_flip_h) return true;
+			if (g_depth_flip_surf) { g_depth_flip_surf->Release(); g_depth_flip_surf = nullptr; }
+			if (g_depth_flip_intz) { g_depth_flip_intz->Release(); g_depth_flip_intz = nullptr; }
+			g_depth_flip_w = g_depth_flip_h = 0;
+			if (FAILED(dev->CreateTexture(w, h, 1, D3DUSAGE_DEPTHSTENCIL,
+				FOURCC_INTZ, D3DPOOL_DEFAULT, &g_depth_flip_intz, nullptr))) return false;
+			if (FAILED(g_depth_flip_intz->GetSurfaceLevel(0, &g_depth_flip_surf)))
+			{
+				g_depth_flip_intz->Release(); g_depth_flip_intz = nullptr;
+				return false;
+			}
+			g_depth_flip_w = (int)w;
+			g_depth_flip_h = (int)h;
+			return true;
+		}
+
+		static bool ensure_depth_copy_ps(IDirect3DDevice9* dev)
+		{
+			if (g_depth_copy_ps) return true;
+			if (g_depth_flip_ps_compile_failed) return false;
+
+			// ps_2_0: sample input texture at TEXCOORD0, write the red channel
+			// (= INTZ depth value) to oDepth. oC0 is required by the PS 2.0
+			// linker even though COLORWRITE is masked out in our state setup.
+			static const char* asm_src =
+				"ps_2_0\n"
+				"dcl_2d s0\n"
+				"dcl t0.xy\n"
+				"texld r0, t0, s0\n"
+				"mov oC0, r0\n"
+				"mov oDepth, r0.x\n";
+
+			ID3DXBuffer* code   = nullptr;
+			ID3DXBuffer* errors = nullptr;
+			HRESULT hr = D3DXAssembleShader(asm_src, (UINT)strlen(asm_src), nullptr, nullptr, 0, &code, &errors);
+			if (errors) errors->Release();
+			if (FAILED(hr) || !code)
+			{
+				g_depth_flip_ps_compile_failed = true;
+				return false;
+			}
+			hr = dev->CreatePixelShader((const DWORD*)code->GetBufferPointer(), &g_depth_copy_ps);
+			code->Release();
+			if (FAILED(hr) || !g_depth_copy_ps)
+			{
+				g_depth_flip_ps_compile_failed = true;
+				return false;
+			}
+			return true;
+		}
+
+		// Returns true and AddRef's *out_tex iff the given DSV's parent is
+		// an INTZ-backed IDirect3DTexture9. Caller must Release.
+		static bool get_main_dsv_intz_texture(IDirect3DSurface9* dsv, IDirect3DTexture9** out_tex)
+		{
+			if (!dsv || !out_tex) return false;
+			*out_tex = nullptr;
+			IDirect3DTexture9* tex = nullptr;
+			if (FAILED(dsv->GetContainer(__uuidof(IDirect3DTexture9), (void**)&tex)) || !tex) return false;
+			D3DSURFACE_DESC sd;
+			if (FAILED(tex->GetLevelDesc(0, &sd)) || sd.Format != FOURCC_INTZ)
+			{
+				tex->Release();
+				return false;
+			}
+			*out_tex = tex;
+			return true;
+		}
+
+		static bool do_main_depth_flip(IDirect3DDevice9* dev)
+		{
+			IDirect3DSurface9* main_dsv = nullptr;
+			if (FAILED(dev->GetDepthStencilSurface(&main_dsv)) || !main_dsv) return false;
+
+			IDirect3DTexture9* main_dsv_tex = nullptr;
+			if (!get_main_dsv_intz_texture(main_dsv, &main_dsv_tex))
+			{
+				main_dsv->Release();
+				return false;
+			}
+
+			D3DSURFACE_DESC dsv_desc;
+			main_dsv->GetDesc(&dsv_desc);
+
+			if (!ensure_depth_flip_intz(dev, dsv_desc.Width, dsv_desc.Height) ||
+				!ensure_depth_copy_ps(dev))
+			{
+				main_dsv_tex->Release();
+				main_dsv->Release();
+				return false;
+			}
+
+			IDirect3DSurface9*    prev_color = nullptr;
+			IDirect3DStateBlock9* sb         = nullptr;
+			if (FAILED(dev->CreateStateBlock(D3DSBT_ALL, &sb))) sb = nullptr;
+			if (FAILED(dev->GetRenderTarget(0, &prev_color))) prev_color = nullptr;
+
+			// Common state for both passes: ZWRITE only, ALWAYS pass, point
+			// sampling, COLORWRITE=0 (oC0 is written but masked out so we
+			// don't disturb whatever color happens to be bound on the RT).
+			auto set_common_state = [&]()
+			{
+				dev->SetVertexShader(nullptr);
+				dev->SetPixelShader(g_depth_copy_ps);
+				dev->SetVertexDeclaration(nullptr);
+				dev->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+				dev->SetRenderState(D3DRS_ZENABLE,           TRUE);
+				dev->SetRenderState(D3DRS_ZWRITEENABLE,      TRUE);
+				dev->SetRenderState(D3DRS_ZFUNC,             D3DCMP_ALWAYS);
+				dev->SetRenderState(D3DRS_CULLMODE,          D3DCULL_NONE);
+				dev->SetRenderState(D3DRS_LIGHTING,          FALSE);
+				dev->SetRenderState(D3DRS_FOGENABLE,         FALSE);
+				dev->SetRenderState(D3DRS_ALPHABLENDENABLE,  FALSE);
+				dev->SetRenderState(D3DRS_ALPHATESTENABLE,   FALSE);
+				dev->SetRenderState(D3DRS_STENCILENABLE,     FALSE);
+				dev->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+				dev->SetRenderState(D3DRS_SRGBWRITEENABLE,   FALSE);
+				dev->SetRenderState(D3DRS_COLORWRITEENABLE,  0);
+				dev->SetSamplerState(0, D3DSAMP_MINFILTER,   D3DTEXF_POINT);
+				dev->SetSamplerState(0, D3DSAMP_MAGFILTER,   D3DTEXF_POINT);
+				dev->SetSamplerState(0, D3DSAMP_ADDRESSU,    D3DTADDRESS_CLAMP);
+				dev->SetSamplerState(0, D3DSAMP_ADDRESSV,    D3DTADDRESS_CLAMP);
+				dev->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+			};
+
+			const float W = (float)dsv_desc.Width;
+			const float H = (float)dsv_desc.Height;
+			struct V { float x, y, z, rhw, u, v; };
+
+			// Pass 1: main INTZ -> scratch INTZ with HORIZONTALLY FLIPPED UVs.
+			// Bind scratch INTZ as DSV. RT stays as prev_color (BB) which has
+			// matching dimensions; COLORWRITE=0 so it isn't touched.
+			dev->SetDepthStencilSurface(g_depth_flip_surf);
+			set_common_state();
+			dev->SetTexture(0, main_dsv_tex);
+			{
+				V quad[4] = {
+					{ -0.5f,    -0.5f,    0.0f, 1.0f, 1.0f, 0.0f },
+					{  W-0.5f,  -0.5f,    0.0f, 1.0f, 0.0f, 0.0f },
+					{ -0.5f,     H-0.5f,  0.0f, 1.0f, 1.0f, 1.0f },
+					{  W-0.5f,   H-0.5f,  0.0f, 1.0f, 0.0f, 1.0f },
+				};
+				dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(V));
+			}
+
+			// Pass 2: scratch INTZ -> main DSV with STRAIGHT UVs. The flip
+			// already happened in pass 1; pass 2 just blits it back.
+			dev->SetDepthStencilSurface(main_dsv);
+			set_common_state();
+			dev->SetTexture(0, g_depth_flip_intz);
+			{
+				V quad[4] = {
+					{ -0.5f,    -0.5f,    0.0f, 1.0f, 0.0f, 0.0f },
+					{  W-0.5f,  -0.5f,    0.0f, 1.0f, 1.0f, 0.0f },
+					{ -0.5f,     H-0.5f,  0.0f, 1.0f, 0.0f, 1.0f },
+					{  W-0.5f,   H-0.5f,  0.0f, 1.0f, 1.0f, 1.0f },
+				};
+				dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(V));
+			}
+
+			// Always release the depth texture binding so we don't leave a
+			// depth-stencil texture sampled on s0 for subsequent draws.
+			dev->SetTexture(0, nullptr);
+
+			// State block restores everything else (incl. shaders, RS, samplers,
+			// FVF, depth-stencil surface). RT is not captured by state blocks
+			// so we restore it explicitly.
+			if (prev_color) { dev->SetRenderTarget(0, prev_color); }
+			if (sb) { sb->Apply(); sb->Release(); }
+			if (prev_color) { prev_color->Release(); }
+			main_dsv_tex->Release();
+			main_dsv->Release();
+			return true;
+		}
+
+		// Wrapper: call after each do_fullscreen_flip when r_fullMirrorDepth is on.
+		static inline void do_main_depth_flip_if_enabled(IDirect3DDevice9* dev)
+		{
+			if (!dvars::r_fullMirrorDepth) return;
+			if (dvars::r_fullMirrorDepth->current.integer == 0) return;
+			do_main_depth_flip(dev);
+		}
+
 		static void on_device_reset()
 		{
 			if (g_saved_color) { g_saved_color->Release(); g_saved_color = nullptr; }
@@ -619,6 +857,7 @@ namespace components
 			g_pending_fullmirror_flip = false;
 			release_targets();
 			release_flip_target();
+			release_depth_flip_resources();
 		}
 	}
 
@@ -1397,7 +1636,13 @@ namespace components
 		{
 			const int full_mirror_eos = dvars::r_fullMirror
 				? dvars::r_fullMirror->current.integer : 0;
-			if (full_mirror_eos == 2) mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
+			if (full_mirror_eos == 2)
+			{
+				mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
+				// v36: also flip main DSV so ReShade MXAO/SSAO reads
+				// depth that matches the visible (flipped) color.
+				mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
+			}
 		}
 
 		// v33 (ported from cod4mirror): clear our off-screen RTT
@@ -1808,6 +2053,11 @@ namespace components
 		{
 			mirror_rtt::g_pending_fullmirror_flip = false;
 			mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
+			// v36: also flip main DSV so ReShade MXAO/SSAO reads depth
+			// that matches the visible (flipped) color. HUD draws after
+			// this point but uses ZENABLE=FALSE, so flipping main DSV
+			// here is safe.
+			mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
 		}
 		// v35.2: HUD-RTT capture is no longer fired from DrawPrimitive.
 		// PSCF c7 only ARMS capture; the actual fire is deferred to the
@@ -1874,6 +2124,11 @@ namespace components
 		{
 			mirror_rtt::g_pending_fullmirror_flip = false;
 			mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
+			// v36: also flip main DSV so ReShade MXAO/SSAO reads depth
+			// that matches the visible (flipped) color. HUD draws after
+			// this point but uses ZENABLE=FALSE, so flipping main DSV
+			// here is safe.
+			mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
 		}
 		// v35.2: HUD-RTT capture is no longer fired from DrawIndexedPrimitive.
 		// PSCF c7 only ARMS capture; the actual fire is deferred to the
