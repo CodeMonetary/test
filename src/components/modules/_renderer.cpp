@@ -1987,6 +1987,14 @@ volatile bool _renderer::gun_seen_this_present = false;
 			/* maxVal	*/ 1,
 			/* flags	*/ game::dvar_flags::saved);
 
+		dvars::r_mirrorViewmodel_logTonemap = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_logTonemap",
+			/* desc		*/ "v37 diagnostic: log tonemap-pass detection to console so we can see whether the v25 PSCF c7 fingerprint matches at different film tweak / contrast / desaturation settings. 0 = off (default). 1 = log every PSCF upload on register c7 (one line per upload) with c70/c71/c72/c73 values, whether the fingerprint matched, and whether tonemap injection ran ok or fell back. 2 = like 1 but also log when r_fullMirror and r_hudMirror arm their pending flags off the same c7 fingerprint. Output goes to the in-game console; capture with /condump <file>. Safe to leave at 0 in regular play (no perf cost, hot path checks the dvar once per upload).",
+			/* default	*/ 0,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 2,
+			/* flags	*/ game::dvar_flags::saved);
+
 		dvars::r_mirrorViewmodel_mirrorFx = game::Dvar_RegisterInt(
 			/* name		*/ "r_mirrorViewmodel_mirrorFx",
 			/* desc		*/ "v26: mirror first-person weapon FX (muzzleflash, brass ejection, etc.) so they line up with the mirrored viewmodel. Pre-hooks FX_SpawnOrientedEffect; when the spawn origin is within r_mirrorViewmodel_mirrorFxDist of the camera AND a mirror mode is active, reflects origin/axis across the plane through the camera with normal = camera right axis. World FX (far from camera) are unaffected. 0 = off (default), 1 = on.",

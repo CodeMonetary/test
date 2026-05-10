@@ -212,3 +212,4 @@ Blend-мод композ-итa. Default `2` = ONE/ONE additive, обычно п
 | v29 | trampoline 8 байт (фикс краша на стрельбе) |
 | v31 | RH-mirror axis mode 2 (фикс дрейфа гильз при повороте) |
 | v32 | `r_fullMirror` для полного flip-а кадра |
+| v37 | диагностический dvar `r_mirrorViewmodel_logTonemap` — лог c7-uploads и результата tonemap-injection в консоль (для поиска причины «песочного» гуна на нестандартных `r_filmTweak*`/`r_contrast`/`r_desaturation`) |

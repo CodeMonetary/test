@@ -190,6 +190,7 @@ namespace dvars
 	game::dvar_s* r_mirrorViewmodel_rttEarlyComposite = nullptr;
 	game::dvar_s* r_mirrorViewmodel_compositeSrgb = nullptr;
 	game::dvar_s* r_mirrorViewmodel_rttTonemapInject = nullptr;
+	game::dvar_s* r_mirrorViewmodel_logTonemap = nullptr;
 	game::dvar_s* r_mirrorViewmodel_mirrorFx = nullptr;
 	game::dvar_s* r_mirrorViewmodel_mirrorFxDist = nullptr;
 	game::dvar_s* r_mirrorViewmodel_mirrorFxLog = nullptr;

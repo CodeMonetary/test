@@ -2269,6 +2269,36 @@ namespace components
 			}
 		}
 
+		// v37 diagnostic: dump every PSCF upload on register c7 to the
+		// in-game console so we can compare what the engine sends at
+		// different r_filmTweak* / r_contrast / r_desaturation settings
+		// vs. the value seen at default. Driven by r_mirrorViewmodel_logTonemap.
+		// 0 = silent (default). 1 = log every c7 upload + fingerprint
+		// match status + per-context flags. 2 = reserved for finer detail.
+		// Capture with /condump tm_<setting>.txt and diff between runs.
+		const int tmlog_level = dvars::r_mirrorViewmodel_logTonemap
+			? dvars::r_mirrorViewmodel_logTonemap->current.integer : 0;
+		if (tmlog_level >= 1 && pConstantData
+			&& StartRegister == 7 && Vector4fCount >= 1)
+		{
+			const float c70 = pConstantData[0];
+			const float c71 = pConstantData[1];
+			const float c72 = pConstantData[2];
+			const float c73 = pConstantData[3];
+			auto tm_fapprox_eq = [](float a, float b) { float d = a - b; if (d < 0) d = -d; return d < 1e-4f; };
+			const bool fp =
+				c70 < 0.0f && c70 > -0.2f &&
+				tm_fapprox_eq(c70, c71) && tm_fapprox_eq(c70, c72) &&
+				c73 > 1.0f && c73 < 5.0f;
+			game::Com_PrintMessage(0, utils::va(
+				"[tmlog] c7=(% .6f % .6f % .6f % .6f) fp=%s vm_active=%d pass=%d seg=%d\n",
+				c70, c71, c72, c73,
+				fp ? "YES" : "NO ",
+				(int)_renderer::mirror_viewmodel_active,
+				(int)mirror_rtt::g_pass_active,
+				(int)mirror_rtt::g_in_segment), 0);
+		}
+
 		// v20: detect the engine's final post-FX/HUD-boundary pixel-shader
 		// constant. Across maps and graphic configs the engine uploads a
 		// PSCF c7 = (-0.066, -0.066, -0.066, 2.773585) exactly once per
@@ -2323,7 +2353,8 @@ namespace components
 
 				const int tonemap_inject = dvars::r_mirrorViewmodel_rttTonemapInject
 					? dvars::r_mirrorViewmodel_rttTonemapInject->current.integer : 1;
-				if (tonemap_inject && mirror_rtt::inject_into_tonemap_source(m_pIDirect3DDevice9))
+				const bool inj_ok = tonemap_inject && mirror_rtt::inject_into_tonemap_source(m_pIDirect3DDevice9);
+				if (inj_ok)
 				{
 					// v25: merge the mirrored gun into the engine's tonemap SOURCE
 					// texture before the final fullscreen tonemap-output draw so the
@@ -2341,6 +2372,18 @@ namespace components
 					mirror_rtt::g_pending_early_composite = true;
 					// v35.10 diagnostic: inject failed -> fallback active
 					++mirror_hud::g_inj_fail_this_frame;
+				}
+				// v37 diagnostic: log tonemap-pass arming decision when
+				// r_mirrorViewmodel_logTonemap >= 1 fires. inject=OK means the
+				// gun was merged into the engine's tonemap source and will receive
+				// the same film curve as the world. inject=FAIL means we fell back
+				// to pending post-tonemap BB composite (no film curve on the gun).
+				if (tmlog_level >= 1)
+				{
+					game::Com_PrintMessage(0, utils::va(
+						"[tmlog] arm: inject=%s tonemap_inject_dvar=%d rtt_early=%d\n",
+						inj_ok ? "OK  " : "FAIL",
+						tonemap_inject, rtt_early), 0);
 				}
 			}
 		}
