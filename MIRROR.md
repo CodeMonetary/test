@@ -229,4 +229,4 @@ Blend-мод композ-итa. Default `2` = ONE/ONE additive, обычно п
 | v33 | `r_mirrorViewmodel_depthFix` / `r_mirrorViewmodel_clearRttDepth` — фикс ghost MXAO на зеркальном гуне |
 | v35 | `r_hudMirror` — отдельный HUD-mirror через RTT (совместим с ReShade Flip.fx) |
 | v36 | `r_fullMirrorDepth` — flip main DSV вслед за color при `r_fullMirror 1/2` (фикс ghost MXAO/SSAO в ReShade) |
-| v37 | расширенный PSCF c7 fingerprint + кэш указателя tonemap-шейдера — гун снова получает filmtweak/grading при произвольных `r_filmTweakBrightness/Contrast/Desaturation`, `r_contrast`, `r_desaturation` |
+| v37 | расширенный PSCF c7 fingerprint — гун снова получает filmtweak/grading при произвольных `r_filmTweakBrightness/Contrast/Desaturation`, `r_contrast`, `r_desaturation`. Изначально включал PS-pointer cache fallback, но он давал ghost-слой на `r_fullMirror 1` и `r_hudMirror 1` (плюс чёрный sun-glare в hud-зеркале) → cache откатан, остался только расширенный structural check |
