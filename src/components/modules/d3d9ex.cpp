@@ -1157,6 +1157,85 @@ namespace components
 		}
 	}
 
+	// ----------------------------------------------------------------------
+	// v38 diag: blur-pass tracing. Helps locate the engine render target that
+	// r_blur composites onto our flipped back-buffer (producing a ghost layer
+	// at r_fullMirror==1). Active only while r_mirrorViewmodel_logBlur > 0.
+	// ----------------------------------------------------------------------
+	namespace mirror_blur_diag
+	{
+		static int g_frame_no            = 0;   // increments on Present
+		static int g_call_no_in_frame    = 0;   // increments on each instrumented call
+		static int g_log_lines_this_frame = 0;  // capped to avoid spam
+		static constexpr int kMaxLinesPerFrame = 400;
+
+		static inline int log_level()
+		{
+			if (!dvars::r_mirrorViewmodel_logBlur) return 0;
+			return dvars::r_mirrorViewmodel_logBlur->current.integer;
+		}
+
+		static inline int r_blur_value()
+		{
+			game::dvar_s* d = game::Dvar_FindVar("r_blur");
+			return (d ? d->current.integer : 0);
+		}
+
+		static inline int r_fullMirror_value()
+		{
+			return dvars::r_fullMirror ? dvars::r_fullMirror->current.integer : 0;
+		}
+
+		static void log_event_str(const char* tag, const char* body)
+		{
+			if (log_level() <= 0) return;
+			if (g_log_lines_this_frame >= kMaxLinesPerFrame) return;
+			++g_log_lines_this_frame;
+			++g_call_no_in_frame;
+			game::Com_PrintMessage(0, utils::va("[blur] f=%d c=%d %s %s\n",
+				g_frame_no, g_call_no_in_frame, tag, body ? body : ""), 0);
+		}
+
+		static void on_present()
+		{
+			if (log_level() > 0)
+			{
+				game::Com_PrintMessage(0, utils::va(
+					"[blur] === present frame=%d r_blur=%d r_fullMirror=%d events=%d ===\n",
+					g_frame_no, r_blur_value(), r_fullMirror_value(),
+					g_call_no_in_frame), 0);
+			}
+			++g_frame_no;
+			g_call_no_in_frame    = 0;
+			g_log_lines_this_frame = 0;
+		}
+
+		static void log_draw(IDirect3DDevice9* dev, const char* api, UINT primCount, UINT numVerts)
+		{
+			if (log_level() < 2) return;
+			if (g_log_lines_this_frame >= kMaxLinesPerFrame) return;
+			IDirect3DBaseTexture9* tex0 = nullptr;
+			if (dev) dev->GetTexture(0, &tex0);
+			IDirect3DPixelShader9* ps = nullptr;
+			if (dev) dev->GetPixelShader(&ps);
+			log_event_str("draw", utils::va("%s prim=%u nv=%u tex0=%p ps=%p",
+				api, primCount, numVerts, (void*)tex0, (void*)ps));
+			if (tex0) tex0->Release();
+			if (ps)   ps->Release();
+		}
+
+		static const char* describe_surface(IDirect3DSurface9* surf)
+		{
+			if (!surf) return "null";
+			D3DSURFACE_DESC desc{};
+			if (FAILED(surf->GetDesc(&desc)))
+				return utils::va("%p ???", (void*)surf);
+			return utils::va("%p %ux%u fmt=%u usage=0x%x pool=%u",
+				(void*)surf, desc.Width, desc.Height,
+				(unsigned)desc.Format, (unsigned)desc.Usage, (unsigned)desc.Pool);
+		}
+	}
+
 #pragma region D3D9Device
 
 	HRESULT d3d9ex::D3D9Device::QueryInterface(REFIID riid, void** ppvObj)
@@ -1268,6 +1347,7 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion)
 	{
+		mirror_blur_diag::on_present();
 		// r_mirrorViewmodel: clear the viewmodel flag at frame boundary so next
 		// frame's world pass isn't rendered with inverted culling.
 		// NOTE: EndScene owns the dump-frame counter. Some IW3 dispatch paths route
@@ -1374,6 +1454,14 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::StretchRect(IDirect3DSurface9* pSourceSurface, CONST RECT* pSourceRect, IDirect3DSurface9* pDestSurface, CONST RECT* pDestRect, D3DTEXTUREFILTERTYPE Filter)
 	{
+		if (mirror_blur_diag::log_level() >= 1)
+		{
+			mirror_blur_diag::log_event_str("StretchRect", utils::va(
+				"src=[%s] dst=[%s] filter=%d",
+				mirror_blur_diag::describe_surface(pSourceSurface),
+				mirror_blur_diag::describe_surface(pDestSurface),
+				(int)Filter));
+		}
 		return m_pIDirect3DDevice9->StretchRect(pSourceSurface, pSourceRect, pDestSurface, pDestRect, Filter);
 	}
 
@@ -1391,6 +1479,11 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetRenderTarget(DWORD RenderTargetIndex, IDirect3DSurface9* pRenderTarget)
 	{
+		if (RenderTargetIndex == 0 && mirror_blur_diag::log_level() >= 1)
+		{
+			mirror_blur_diag::log_event_str("SetRT0", utils::va("rt=[%s]",
+				mirror_blur_diag::describe_surface(pRenderTarget)));
+		}
 		// v35.1: while HUD-RTT capture is active, intercept index-0 RT
 		// rebinds. The iw3 HUD pass starts with the engine binding the
 		// back-buffer (or its current pingpong) again right after the
@@ -1702,9 +1795,12 @@ namespace components
 				// v36: only flip main DSV when the color flip itself succeeded.
 				// If the color flip failed, leaving depth untouched keeps color
 				// and depth in sync (same orientation as before this frame).
-				if (mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9))
+				const bool flip_ok_es = mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
+				mirror_blur_diag::log_event_str("flipBB", utils::va("site=EndScene2 ok=%d", flip_ok_es ? 1 : 0));
+				if (flip_ok_es)
 				{
 					mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
+					mirror_blur_diag::log_event_str("flipDSV", "site=EndScene2");
 				}
 			}
 		}
@@ -2094,6 +2190,7 @@ namespace components
 				"  DRAW raw prim=%u  follow=%d\n",
 				PrimitiveCount, _renderer::mirror_vscf_follow_remaining);
 		}
+		mirror_blur_diag::log_draw(m_pIDirect3DDevice9, "DrawPrim", PrimitiveCount, 0);
 		HRESULT hr = m_pIDirect3DDevice9->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount);
 		if (v35_14_escape_dp) {
 			m_pIDirect3DDevice9->SetRenderTarget(0, mirror_hud::g_color);
@@ -2120,9 +2217,12 @@ namespace components
 			// If the color flip failed, leaving depth untouched keeps color
 			// and depth in sync. HUD draws after this point but uses
 			// ZENABLE=FALSE, so flipping main DSV here is safe.
-			if (mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9))
+			const bool flip_ok = mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
+			mirror_blur_diag::log_event_str("flipBB", utils::va("site=postDraw ok=%d", flip_ok ? 1 : 0));
+			if (flip_ok)
 			{
 				mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
+				mirror_blur_diag::log_event_str("flipDSV", "site=postDraw");
 			}
 		}
 		// v35.2: HUD-RTT capture is no longer fired from DrawPrimitive.
@@ -2164,6 +2264,7 @@ namespace components
 				"  DRAW idx prim=%u nverts=%u  follow=%d\n",
 				primCount, NumVertices, _renderer::mirror_vscf_follow_remaining);
 		}
+		mirror_blur_diag::log_draw(m_pIDirect3DDevice9, "DrawIdx", primCount, NumVertices);
 		HRESULT hr = m_pIDirect3DDevice9->DrawIndexedPrimitive(PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices, startIndex, primCount);
 		if (v35_14_escape_dip) {
 			m_pIDirect3DDevice9->SetRenderTarget(0, mirror_hud::g_color);
@@ -2193,9 +2294,12 @@ namespace components
 			// If the color flip failed, leaving depth untouched keeps color
 			// and depth in sync. HUD draws after this point but uses
 			// ZENABLE=FALSE, so flipping main DSV here is safe.
-			if (mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9))
+			const bool flip_ok = mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
+			mirror_blur_diag::log_event_str("flipBB", utils::va("site=postDraw ok=%d", flip_ok ? 1 : 0));
+			if (flip_ok)
 			{
 				mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
+				mirror_blur_diag::log_event_str("flipDSV", "site=postDraw");
 			}
 		}
 		// v35.2: HUD-RTT capture is no longer fired from DrawIndexedPrimitive.
@@ -2573,6 +2677,19 @@ namespace components
 		{
 			//Logger::Print("Invalid shader constant array!\n");
 			return D3DERR_INVALIDCALL;
+		}
+
+		if (StartRegister == 7 && Vector4fCount >= 1 && pConstantData
+			&& mirror_blur_diag::log_level() >= 1)
+		{
+			const float c70 = pConstantData[0];
+			const float c71 = pConstantData[1];
+			const float c72 = pConstantData[2];
+			const float c73 = pConstantData[3];
+			const bool fp = mirror_rtt::match_tonemap_signal(
+				m_pIDirect3DDevice9, c70, c71, c72, c73);
+			mirror_blur_diag::log_event_str("PSCF7", utils::va(
+				"c7=(%.4f,%.4f,%.4f,%.4f) fp=%d", c70, c71, c72, c73, fp ? 1 : 0));
 		}
 
 		if (_renderer::mirror_dump_active() && pConstantData)

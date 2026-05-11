@@ -198,6 +198,7 @@ namespace dvars
 game::dvar_s* r_fullMirror = nullptr;
 	game::dvar_s* r_fullMirrorDepth = nullptr;
 	game::dvar_s* r_hudMirror = nullptr;
+	game::dvar_s* r_mirrorViewmodel_logBlur = nullptr;
 	game::dvar_s* r_mirrorViewmodel_depthFix = nullptr;
 	game::dvar_s* r_mirrorViewmodel_clearRttDepth = nullptr;
 	game::dvar_s* bg_bobIdle = nullptr;

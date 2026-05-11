@@ -2058,6 +2058,23 @@ volatile bool _renderer::gun_seen_this_present = false;
 			/* maxVal	*/ 1,
 			/* flags	*/ game::dvar_flags::saved);
 
+		// v38 diag: trace frame-level D3D9 RT/Texture/StretchRect/PSCF events
+		// so the r_blur ghost on r_fullMirror==1 (engine motion-blur or
+		// downsample composite reading a pre-flip texture) can be pinpointed
+		// to a specific render-target / draw call. When >0, hooks log to the
+		// engine console. Caps per-frame line count to avoid log explosion.
+		// 0 = off (default). 1 = log StretchRect / SetRenderTarget(0) /
+		// do_fullscreen_flip / PSCF c7 (tonemap fingerprint) events with a
+		// frame+call counter. 2 = also log every DrawPrimitive/DrawIndexedPrimitive
+		// with stage-0 texture pointer (very verbose; use briefly).
+		dvars::r_mirrorViewmodel_logBlur = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_logBlur",
+			/* desc		*/ "v38 diag: dump frame-level D3D9 ops (StretchRect, SetRenderTarget(0), do_fullscreen_flip, PSCF c7) to console_mp.log so we can find which texture the engine r_blur composites over the flipped back-buffer. 0 = off (default). 1 = events only. 2 = events + per-draw stage-0 texture (very verbose).",
+			/* default	*/ 0,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 2,
+			/* flags	*/ game::dvar_flags::saved);
+
 		// v33: ported from cod4mirror — fix MXAO/SSAO bleed-through on the
 		// mirrored gun. ReShade's MXAO samples the engine main depth-stencil
 		// to compute ambient occlusion. With r_mirrorViewmodel_rtt=1 the

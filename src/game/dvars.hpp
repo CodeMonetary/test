@@ -204,6 +204,7 @@ namespace dvars
 	extern game::dvar_s* r_fullMirror;
 	extern game::dvar_s* r_fullMirrorDepth;
 	extern game::dvar_s* r_hudMirror;
+	extern game::dvar_s* r_mirrorViewmodel_logBlur;
 	extern game::dvar_s* r_mirrorViewmodel_depthFix;
 	extern game::dvar_s* r_mirrorViewmodel_clearRttDepth;
 	extern game::dvar_s* bg_bobIdle;
