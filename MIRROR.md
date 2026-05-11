@@ -212,3 +212,5 @@ Blend-мод композ-итa. Default `2` = ONE/ONE additive, обычно п
 | v29 | trampoline 8 байт (фикс краша на стрельбе) |
 | v31 | RH-mirror axis mode 2 (фикс дрейфа гильз при повороте) |
 | v32 | `r_fullMirror` для полного flip-а кадра |
+| v36 | `r_fullMirrorDepth` — flip main DSV вслед за color при `r_fullMirror 1/2` (фикс ghost MXAO/SSAO в ReShade) |
+| v37 | расширенный PSCF c7 fingerprint + кэш указателя tonemap-шейдера — гун снова получает filmtweak/grading при произвольных `r_filmTweakBrightness/Contrast/Desaturation`, `r_contrast`, `r_desaturation` |
