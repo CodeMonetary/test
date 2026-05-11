@@ -213,4 +213,4 @@ Blend-мод композ-итa. Default `2` = ONE/ONE additive, обычно п
 | v31 | RH-mirror axis mode 2 (фикс дрейфа гильз при повороте) |
 | v32 | `r_fullMirror` для полного flip-а кадра |
 | v36 | `r_fullMirrorDepth` — flip main DSV вслед за color при `r_fullMirror 1/2` (фикс ghost MXAO/SSAO в ReShade) |
-| v37 | расширенный PSCF c7 fingerprint + кэш указателя tonemap-шейдера — гун снова получает filmtweak/grading при произвольных `r_filmTweakBrightness/Contrast/Desaturation`, `r_contrast`, `r_desaturation` |
+| v37 | расширенный PSCF c7 fingerprint — гун снова получает filmtweak/grading при произвольных `r_filmTweakBrightness/Contrast/Desaturation`, `r_contrast`, `r_desaturation`. Изначально включал PS-pointer cache fallback, но он давал ghost-слой на `r_fullMirror 1` и `r_hudMirror 1` (плюс чёрный sun-glare в hud-зеркале) → cache откатан, остался только расширенный structural check |

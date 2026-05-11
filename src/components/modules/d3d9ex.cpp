@@ -98,25 +98,21 @@ namespace components
 		static int  g_flip_h                     = 0;
 		static bool g_pending_fullmirror_flip    = false; // set on PSCF c7 fingerprint when fullMirror==1; fires AFTER the next draw
 
-		// v37: tonemap/filmtweak pixel-shader pointer cache.
-		// The engine pixel shader that uploads c7=(-0.066,-0.066,-0.066,2.77)
-		// is the SAME object that uploads (-0.066,-0.066,-0.066,13.24) when
-		// r_desaturation=0 and (-0.766,...,13.24) when r_contrast=2. Latched
-		// the FIRST time the widened structural fingerprint matches; from then
-		// on a current-PS match acts as a fallback signal so extreme dvar
-		// values (which push c7 outside even the widened bounds) still arm
-		// the inject/flip paths. Weak reference (no AddRef): cleared on Reset,
-		// and stale-pointer comparisons are safe (numeric compare only).
-		static IDirect3DPixelShader9* g_tonemap_ps_cache = nullptr;
-
-		// v37: shared structural fingerprint for the engine's post-FX tonemap /
-		// filmtweak pass. Same RGB on c70..c72, c70 slightly negative, c73 in
-		// a wide positive range. Earlier bounds (-0.2<c70<0, 1<c73<5) were
-		// derived from default film tweak settings only and broke when the
-		// user moved r_contrast/r_desaturation off default (the engine drives
-		// c7 from those dvars: r_contrast=2 -> c70~-0.766; r_desaturation=0
-		// -> c73~13.24). Widened bounds capture all observed cases with a
-		// safe margin for further dvar tuning.
+		// v37.1: tonemap-pass fingerprint.
+		// Same RGB on c70..c72, c70 slightly negative, c73 a positive gamma
+		// exponent. Earlier bounds (-0.2<c70<0, 1<c73<5) were derived from
+		// default film tweak settings only and broke when the user moved
+		// r_contrast/r_desaturation off default (the engine drives c7 from
+		// those dvars: r_contrast=2 -> c70~-0.766; r_desaturation=0 -> c73~13.24).
+		// Widened bounds capture all observed cases with a safe margin.
+		//
+		// v37.0 also added a pixel-shader-pointer cache fallback. That caused
+		// over-detection on r_fullMirror==1 and r_hudMirror==1 (translucent
+		// ghost world+gun on the wrong side, sun-glare turning into a black
+		// rect): the cached tonemap PS pointer matched secondary c7 uploads
+		// from related post-FX passes that the strict bounds had previously
+		// rejected, arming an extra flip/HUD-capture per frame. Reverted - the
+		// widened structural check alone covers every observed dvar setting.
 		static inline bool match_tonemap_structural(float c70, float c71, float c72, float c73)
 		{
 			auto fapprox_eq = [](float a, float b) { float d = a - b; if (d < 0) d = -d; return d < 1e-4f; };
@@ -125,28 +121,16 @@ namespace components
 				&& c73 > 0.5f && c73 < 20.0f;
 		}
 
-		// v37: full tonemap-signal match (structural OR cached PS pointer).
-		// As a side effect, latches the current pixel-shader pointer the FIRST
-		// time the structural match succeeds. Returns true if EITHER source
-		// indicates the post-FX tonemap pass.
+		// v37.1: shared entry point used by all 3 PSCF c7 detection sites.
+		// Currently a thin wrapper around match_tonemap_structural; the
+		// `dev` parameter is preserved so the signature can carry future
+		// per-pass disambiguation (e.g. bound RT format) without touching
+		// the call sites again. (void)dev silences the unused-parameter warning.
 		static inline bool match_tonemap_signal(IDirect3DDevice9* dev,
 			float c70, float c71, float c72, float c73)
 		{
-			const bool structural = match_tonemap_structural(c70, c71, c72, c73);
-			if (!dev) return structural;
-			IDirect3DPixelShader9* cur = nullptr;
-			if (FAILED(dev->GetPixelShader(&cur))) return structural;
-			bool result = structural;
-			if (structural)
-			{
-				if (!g_tonemap_ps_cache && cur) g_tonemap_ps_cache = cur; // weak ref
-			}
-			else if (cur && cur == g_tonemap_ps_cache)
-			{
-				result = true; // cache fallback: dvars pushed c7 outside even the widened bounds
-			}
-			if (cur) cur->Release();
-			return result;
+			(void)dev;
+			return match_tonemap_structural(c70, c71, c72, c73);
 		}
 
 		static void release_targets()
@@ -668,7 +652,6 @@ namespace components
 			g_in_segment             = false;
 			g_pending_early_composite = false;
 			g_pending_fullmirror_flip = false;
-			g_tonemap_ps_cache       = nullptr; // v37: weak ref, drop on device reset
 			release_targets();
 			release_flip_target();
 		}
