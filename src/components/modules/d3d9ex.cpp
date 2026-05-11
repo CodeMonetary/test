@@ -98,6 +98,57 @@ namespace components
 		static int  g_flip_h                     = 0;
 		static bool g_pending_fullmirror_flip    = false; // set on PSCF c7 fingerprint when fullMirror==1; fires AFTER the next draw
 
+		// v37: tonemap/filmtweak pixel-shader pointer cache.
+		// The engine pixel shader that uploads c7=(-0.066,-0.066,-0.066,2.77)
+		// is the SAME object that uploads (-0.066,-0.066,-0.066,13.24) when
+		// r_desaturation=0 and (-0.766,...,13.24) when r_contrast=2. Latched
+		// the FIRST time the widened structural fingerprint matches; from then
+		// on a current-PS match acts as a fallback signal so extreme dvar
+		// values (which push c7 outside even the widened bounds) still arm
+		// the inject/flip paths. Weak reference (no AddRef): cleared on Reset,
+		// and stale-pointer comparisons are safe (numeric compare only).
+		static IDirect3DPixelShader9* g_tonemap_ps_cache = nullptr;
+
+		// v37: shared structural fingerprint for the engine's post-FX tonemap /
+		// filmtweak pass. Same RGB on c70..c72, c70 slightly negative, c73 in
+		// a wide positive range. Earlier bounds (-0.2<c70<0, 1<c73<5) were
+		// derived from default film tweak settings only and broke when the
+		// user moved r_contrast/r_desaturation off default (the engine drives
+		// c7 from those dvars: r_contrast=2 -> c70~-0.766; r_desaturation=0
+		// -> c73~13.24). Widened bounds capture all observed cases with a
+		// safe margin for further dvar tuning.
+		static inline bool match_tonemap_structural(float c70, float c71, float c72, float c73)
+		{
+			auto fapprox_eq = [](float a, float b) { float d = a - b; if (d < 0) d = -d; return d < 1e-4f; };
+			return c70 < 0.0f && c70 > -1.5f
+				&& fapprox_eq(c70, c71) && fapprox_eq(c70, c72)
+				&& c73 > 0.5f && c73 < 20.0f;
+		}
+
+		// v37: full tonemap-signal match (structural OR cached PS pointer).
+		// As a side effect, latches the current pixel-shader pointer the FIRST
+		// time the structural match succeeds. Returns true if EITHER source
+		// indicates the post-FX tonemap pass.
+		static inline bool match_tonemap_signal(IDirect3DDevice9* dev,
+			float c70, float c71, float c72, float c73)
+		{
+			const bool structural = match_tonemap_structural(c70, c71, c72, c73);
+			if (!dev) return structural;
+			IDirect3DPixelShader9* cur = nullptr;
+			if (FAILED(dev->GetPixelShader(&cur))) return structural;
+			bool result = structural;
+			if (structural)
+			{
+				if (!g_tonemap_ps_cache && cur) g_tonemap_ps_cache = cur; // weak ref
+			}
+			else if (cur && cur == g_tonemap_ps_cache)
+			{
+				result = true; // cache fallback: dvars pushed c7 outside even the widened bounds
+			}
+			if (cur) cur->Release();
+			return result;
+		}
+
 		static void release_targets()
 		{
 			if (g_color) { g_color->Release(); g_color = nullptr; }
@@ -855,6 +906,7 @@ namespace components
 			g_in_segment             = false;
 			g_pending_early_composite = false;
 			g_pending_fullmirror_flip = false;
+			g_tonemap_ps_cache       = nullptr; // v37: weak ref, drop on device reset
 			release_targets();
 			release_flip_target();
 			release_depth_flip_resources();
@@ -2555,19 +2607,17 @@ namespace components
 			const float c71 = pConstantData[1];
 			const float c72 = pConstantData[2];
 			const float c73 = pConstantData[3];
-			// v23: generalized tonemap-shader fingerprint. The exact values shift
-			// based on the engine's gamma/exposure setting (live match observed
-			// (-0.066, -0.066, -0.066, 2.773585), demo replay observed
-			// (-0.013772, -0.013772, -0.013772, 1.222222)) but the STRUCTURE is
-			// the same: the first three components are equal and slightly
-			// negative, the fourth is the gamma exponent in [1.0, 5.0]. This
-			// shape is unique to the final tonemap technique and never appears
-			// in stencil-shadow / post-FX bloom / world / viewmodel passes.
-			auto fapprox_eq = [](float a, float b) { float d = a - b; if (d < 0) d = -d; return d < 1e-4f; };
-			const bool is_pre_hud_signal =
-				c70 < 0.0f && c70 > -0.2f &&
-				fapprox_eq(c70, c71) && fapprox_eq(c70, c72) &&
-				c73 > 1.0f && c73 < 5.0f;
+			// v23/v37: generalized tonemap-shader fingerprint. The exact values
+			// shift based on the engine's gamma/exposure/grading dvars (default
+			// (-0.066,-0.066,-0.066, 2.773585); demo replay (-0.013772,...,1.222222);
+			// r_desaturation=0 -> c73~13.24; r_contrast=2 -> c70~-0.766) but the
+			// STRUCTURE is the same: c70..c72 equal and negative, c73 a positive
+			// gamma-exponent. v37 widens bounds AND caches the pixel-shader
+			// pointer on first structural match so extreme film tweak settings
+			// (r_filmTweakBrightness/Contrast/Desaturation, r_contrast,
+			// r_desaturation) no longer break detection.
+			const bool is_pre_hud_signal = mirror_rtt::match_tonemap_signal(
+				m_pIDirect3DDevice9, c70, c71, c72, c73);
 			if (is_pre_hud_signal)
 			{
 				// v33 (ported from cod4mirror): rewrite main depth at the
@@ -2620,11 +2670,10 @@ namespace components
 				const float c71 = pConstantData[1];
 				const float c72 = pConstantData[2];
 				const float c73 = pConstantData[3];
-				auto fapprox_eq = [](float a, float b) { float d = a - b; if (d < 0) d = -d; return d < 1e-4f; };
-				const bool is_pre_hud_signal =
-					c70 < 0.0f && c70 > -0.2f &&
-					fapprox_eq(c70, c71) && fapprox_eq(c70, c72) &&
-					c73 > 1.0f && c73 < 5.0f;
+				// v37: widened bounds + PS-pointer cache fallback so r_fullMirror
+				// also survives extreme r_contrast / r_desaturation values.
+				const bool is_pre_hud_signal = mirror_rtt::match_tonemap_signal(
+					m_pIDirect3DDevice9, c70, c71, c72, c73);
 				if (is_pre_hud_signal) mirror_rtt::g_pending_fullmirror_flip = true;
 			}
 		}
@@ -2645,11 +2694,10 @@ namespace components
 				const float c71 = pConstantData[1];
 				const float c72 = pConstantData[2];
 				const float c73 = pConstantData[3];
-				auto fapprox_eq = [](float a, float b) { float d = a - b; if (d < 0) d = -d; return d < 1e-4f; };
-				const bool is_pre_hud_signal =
-					c70 < 0.0f && c70 > -0.2f &&
-					fapprox_eq(c70, c71) && fapprox_eq(c70, c72) &&
-					c73 > 1.0f && c73 < 5.0f;
+				// v37: widened bounds + PS-pointer cache fallback so r_hudMirror
+				// also survives extreme r_contrast / r_desaturation values.
+				const bool is_pre_hud_signal = mirror_rtt::match_tonemap_signal(
+					m_pIDirect3DDevice9, c70, c71, c72, c73);
 				// v35.8: gate arming on mirror_rtt::g_dhp_seen_this_frame.
 				// In damage-flash frames the engine emits an early c7
 				// match BEFORE the gun pass starts (during damage-overlay

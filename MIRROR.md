@@ -228,4 +228,5 @@ Blend-мод композ-итa. Default `2` = ONE/ONE additive, обычно п
 | v32 | `r_fullMirror` для полного flip-а кадра |
 | v33 | `r_mirrorViewmodel_depthFix` / `r_mirrorViewmodel_clearRttDepth` — фикс ghost MXAO на зеркальном гуне |
 | v35 | `r_hudMirror` — отдельный HUD-mirror через RTT (совместим с ReShade Flip.fx) |
-| v36 | `r_fullMirrorDepth` — flip main DSV после `r_fullMirror`, фикс ghost MXAO/SSAO на зеркальном мире |
+| v36 | `r_fullMirrorDepth` — flip main DSV вслед за color при `r_fullMirror 1/2` (фикс ghost MXAO/SSAO в ReShade) |
+| v37 | расширенный PSCF c7 fingerprint + кэш указателя tonemap-шейдера — гун снова получает filmtweak/grading при произвольных `r_filmTweakBrightness/Contrast/Desaturation`, `r_contrast`, `r_desaturation` |
