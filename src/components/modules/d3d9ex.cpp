@@ -98,21 +98,22 @@ namespace components
 		static int  g_flip_h                     = 0;
 		static bool g_pending_fullmirror_flip    = false; // set on PSCF c7 fingerprint when fullMirror==1; fires AFTER the next draw
 
-		// v37.1: tonemap-pass fingerprint.
+		// v37.2: pixel-shader-pointer cache for the engine's post-FX tonemap pass.
+		// Latched on the FIRST successful structural match; used as a fallback
+		// when the dvar settings push c7 outside even the widened structural
+		// bounds. Weak reference (no AddRef), cleared on Reset(). Stale-pointer
+		// comparisons are safe (numeric compare only, never dereferenced).
+		static IDirect3DPixelShader9* g_tonemap_ps_cache = nullptr;
+
+		// v37.2: tonemap-pass fingerprint - structural part only.
 		// Same RGB on c70..c72, c70 slightly negative, c73 a positive gamma
 		// exponent. Earlier bounds (-0.2<c70<0, 1<c73<5) were derived from
-		// default film tweak settings only and broke when the user moved
-		// r_contrast/r_desaturation off default (the engine drives c7 from
-		// those dvars: r_contrast=2 -> c70~-0.766; r_desaturation=0 -> c73~13.24).
-		// Widened bounds capture all observed cases with a safe margin.
-		//
-		// v37.0 also added a pixel-shader-pointer cache fallback. That caused
-		// over-detection on r_fullMirror==1 and r_hudMirror==1 (translucent
-		// ghost world+gun on the wrong side, sun-glare turning into a black
-		// rect): the cached tonemap PS pointer matched secondary c7 uploads
-		// from related post-FX passes that the strict bounds had previously
-		// rejected, arming an extra flip/HUD-capture per frame. Reverted - the
-		// widened structural check alone covers every observed dvar setting.
+		// default film tweak settings only; the engine drives c7 from
+		// r_contrast (-> c70) and r_desaturation (-> c73), so any non-default
+		// setting moved c7 outside those bounds and broke detection.
+		// Widened bounds capture all dvar combos observed in PR #4 diagnostics
+		// (default: c70=-0.066/c73=2.77; r_contrast=2: c70=-0.766; r_desaturation=0:
+		// c73=13.24) with margin.
 		static inline bool match_tonemap_structural(float c70, float c71, float c72, float c73)
 		{
 			auto fapprox_eq = [](float a, float b) { float d = a - b; if (d < 0) d = -d; return d < 1e-4f; };
@@ -121,16 +122,40 @@ namespace components
 				&& c73 > 0.5f && c73 < 20.0f;
 		}
 
-		// v37.1: shared entry point used by all 3 PSCF c7 detection sites.
-		// Currently a thin wrapper around match_tonemap_structural; the
-		// `dev` parameter is preserved so the signature can carry future
-		// per-pass disambiguation (e.g. bound RT format) without touching
-		// the call sites again. (void)dev silences the unused-parameter warning.
+		// v37.2: tonemap signal = structural match OR (cached PS + RGB equality).
+		// The cache fallback exists because users can push r_contrast / r_desaturation
+		// far enough to move c7 outside the widened structural bounds. v37.0 made
+		// the cache fallback unconditional on c7 shape, which caused over-detection
+		// on r_fullMirror==1 and r_hudMirror==1: the engine reuses the tonemap PS
+		// for secondary post-FX passes (sun fade / colour grade) that upload
+		// c7=(3.78,4.00,3.56,1.00) - different RGB per component, structurally not
+		// a tonemap signal, but the cache matched on PS pointer alone and produced
+		// translucent ghosts. v37.2 keeps the cache but ALSO requires c70==c71==c72
+		// in the cache branch, so the secondary passes (which use distinct per-mesh
+		// lighting constants with non-equal RGB) are correctly rejected.
 		static inline bool match_tonemap_signal(IDirect3DDevice9* dev,
 			float c70, float c71, float c72, float c73)
 		{
-			(void)dev;
-			return match_tonemap_structural(c70, c71, c72, c73);
+			auto fapprox_eq = [](float a, float b) { float d = a - b; if (d < 0) d = -d; return d < 1e-4f; };
+			const bool same_rgb = fapprox_eq(c70, c71) && fapprox_eq(c70, c72);
+			const bool structural = match_tonemap_structural(c70, c71, c72, c73);
+			if (!dev) return structural;
+			IDirect3DPixelShader9* cur = nullptr;
+			if (FAILED(dev->GetPixelShader(&cur))) return structural;
+			bool result = structural;
+			if (structural)
+			{
+				if (!g_tonemap_ps_cache && cur) g_tonemap_ps_cache = cur; // weak ref, latch on first hit
+			}
+			else if (same_rgb && cur && cur == g_tonemap_ps_cache)
+			{
+				// cache fallback - RGB equality REQUIRED so per-mesh lighting
+				// constants (3.78,4.00,3.56,1.00) are rejected even though they
+				// may share the cached PS pointer with the real tonemap pass.
+				result = true;
+			}
+			if (cur) cur->Release();
+			return result;
 		}
 
 		static void release_targets()
@@ -652,6 +677,7 @@ namespace components
 			g_in_segment             = false;
 			g_pending_early_composite = false;
 			g_pending_fullmirror_flip = false;
+			g_tonemap_ps_cache       = nullptr; // v37.2: weak ref, drop on device reset
 			release_targets();
 			release_flip_target();
 		}
