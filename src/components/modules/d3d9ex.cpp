@@ -125,6 +125,37 @@ namespace components
 		// behaviour for that frame).
 		static bool g_pending_fullmirror_flip_hud_gated = false;
 
+		// v39: deferred (HUD-start-gated) gun-RTT composite path. When DOF
+		// is enabled (r_dof_tweak / r_dof_enable) the engine runs a DOF
+		// post-FX pass AFTER the tonemap output but BEFORE HUD. That pass
+		// reads main DSV depth and, since our depth-fix wrote z=0 (near)
+		// at gun pixels for MXAO/SSAO, treats those pixels as "extremely
+		// out of focus" and blurs the gun pixels with neighbouring (wall)
+		// samples until the gun is no longer visible. Injecting the gun
+		// into the tonemap SOURCE means the gun is already on the back-
+		// buffer when DOF samples it, so it gets averaged away.
+		//
+		// Fix: when DOF is active, SKIP inject_into_tonemap_source AND
+		// SKIP the v22 pending_early_composite path -- both put the gun
+		// on the BB before DOF. Instead defer the composite to the same
+		// HUD-start signal v38.2 uses for fullMirror flip, which fires
+		// AFTER the DOF pass. The gun is then painted on top of the
+		// already-DOF'd world, untouched by DOF (matches the engine's
+		// own late-viewmodel ordering when r_mirrorViewmodel_rtt is off).
+		//
+		// Trade-off: the gun bypasses the engine tonemap/filmtweak curve
+		// in this path. SRGBWRITE keeps the gun in matching colour space
+		// with the world, but extreme r_filmTweakBrightness / r_contrast /
+		// r_desaturation will look slightly different on the gun. That is
+		// acceptable for DOF mode and beats the gun disappearing.
+		//
+		// EndScene fallback: if HUD-start never fires (menu / console
+		// without HUD), the existing EndScene check
+		//   if (g_pass_active || g_in_segment) final_composite(...)
+		// still fires because we leave g_pass_active=true when skipping
+		// inject. No extra fallback needed.
+		static bool g_pending_hud_start_composite = false;
+
 		// v37.2: pixel-shader-pointer cache for the engine's post-FX tonemap pass.
 		// Latched on the FIRST successful structural match; used as a fallback
 		// when the dvar settings push c7 outside even the widened structural
@@ -183,6 +214,62 @@ namespace components
 			}
 			if (cur) cur->Release();
 			return result;
+		}
+
+		// v39: DOF detection helper. Returns true iff the engine has DOF
+		// enabled this frame, in which case the gun-RTT composite must be
+		// deferred past the DOF post-FX pass (see g_pending_hud_start_composite).
+		//
+		//   r_dof_tweak  (default 0) -- when raised >= 1, forces DOF every
+		//                                frame regardless of ADS. Gun goes
+		//                                completely invisible at any zoom
+		//                                state because DOF samples gun pixels
+		//                                at z=0 (depth-fix) and blurs them.
+		//   r_dof_enable (default 1 in CoD4)  -- engine's ADS-DOF gate; DOF
+		//                                only actually fires when the player
+		//                                is in aim-down-sights. We have no
+		//                                cheap ADS signal from D3D9 alone, so
+		//                                checking r_dof_enable would also
+		//                                trigger in every hip-fire frame (where
+		//                                DOF isn't actually running) and bypass
+		//                                filmtweak on the gun unnecessarily.
+		//                                For that reason this auto-mode by
+		//                                default checks ONLY r_dof_tweak; users
+		//                                who also want the r_dof_enable+ADS
+		//                                case fixed can opt in via mode 2.
+		//
+		// User-tunable via r_mirrorViewmodel_dofWorkaround:
+		//   0 = off (force inject path, original v25 behaviour;
+		//        gun invisible under r_dof_tweak / r_dof_enable+ADS)
+		//   1 = check r_dof_tweak >= 1 only (default; fixes r_dof_tweak
+		//        without ever bypassing filmtweak in non-DOF frames)
+		//   2 = check r_dof_tweak OR r_dof_enable >= 1 (fixes r_dof_enable+ADS
+		//        too at the cost of bypassing filmtweak on gun in non-ADS
+		//        frames when r_dof_enable defaults to 1)
+		//   3 = always defer (force late composite unconditionally;
+		//        most aggressive; useful for diagnostics)
+		//
+		// Dvar pointers cached once on first call (one Dvar_FindVar per dvar)
+		// to avoid string hashing per PSCF c7.
+		static bool dof_is_active()
+		{
+			const int mode = dvars::r_mirrorViewmodel_dofWorkaround
+				? dvars::r_mirrorViewmodel_dofWorkaround->current.integer : 1;
+			if (mode == 0) return false;
+			if (mode >= 3) return true;
+			static game::dvar_s* d_dof_tweak  = nullptr;
+			static game::dvar_s* d_dof_enable = nullptr;
+			static bool s_looked_up = false;
+			if (!s_looked_up)
+			{
+				d_dof_tweak  = game::Dvar_FindVar("r_dof_tweak");
+				d_dof_enable = game::Dvar_FindVar("r_dof_enable");
+				s_looked_up = true;
+			}
+			if (d_dof_tweak  && d_dof_tweak->current.integer  >= 1) return true;
+			if (mode >= 2 && d_dof_enable && d_dof_enable->current.integer >= 1)
+				return true;
+			return false;
 		}
 
 		static void release_targets()
@@ -943,6 +1030,7 @@ namespace components
 			g_pending_early_composite = false;
 			g_pending_fullmirror_flip = false;
 			g_pending_fullmirror_flip_hud_gated = false; // v38: blur fix
+			g_pending_hud_start_composite = false; // v39: DOF fix
 			g_tonemap_ps_cache       = nullptr; // v37.2: weak ref, drop on device reset
 			release_targets();
 			release_flip_target();
@@ -1805,6 +1893,11 @@ namespace components
 			}
 		}
 
+		// v39: clear the HUD-start gun-RTT composite pending flag. The actual
+		// composite will still fire below via the existing g_pass_active gate
+		// (we left g_pass_active=true when arming the deferred path at PSCF c7).
+		mirror_rtt::g_pending_hud_start_composite = false;
+
 		// v33 (ported from cod4mirror): clear our off-screen RTT
 		// depth-stencil to far at end of every frame. ReShade's
 		// Generic Depth addon scans D3D9 CreateDepthStencilSurface
@@ -1988,6 +2081,23 @@ namespace components
 			const bool flip_ok = mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
 			if (flip_ok)
 				mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
+		}
+
+		// v39: HUD-start-gated gun-RTT composite fire. Armed at PSCF c7
+		// when DOF is active (dof_is_active() returns true). Firing here
+		// means the gun is painted onto the BB AFTER the engine's DOF
+		// post-FX pass (which runs between tonemap and HUD), so DOF only
+		// sees the world depth and never blurs the gun pixels away.
+		// EndScene fallback: if HUD never arrives (menu/console), the
+		// existing `if (g_pass_active || g_in_segment) final_composite(...)`
+		// in EndScene fires because g_pass_active is still true.
+		if (hud_start_fired
+			&& mirror_rtt::g_pending_hud_start_composite
+			&& (mirror_rtt::g_pass_active || mirror_rtt::g_in_segment))
+		{
+			mirror_rtt::g_pending_hud_start_composite = false;
+			if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
+			mirror_rtt::final_composite(m_pIDirect3DDevice9);
 		}
 		// v35.20: SetRenderState override removed -- v35.19 log showed
 		// ablend_ovr=0 every frame because the engine sets SRCBLENDALPHA
@@ -2768,6 +2878,20 @@ namespace components
 					mirror_rtt::apply_main_depth_fix(m_pIDirect3DDevice9, dfix_mode);
 				}
 
+				// v39: if DOF is enabled, skip both the inject path AND the
+				// pending_early fallback. Both put the gun on the BB before the
+				// engine's DOF post-FX, which then reads main DSV (gun pixels at
+				// z=0 from depth-fix) and blurs the gun until invisible. Instead
+				// arm the HUD-start-gated composite so the gun is painted AFTER
+				// DOF but BEFORE HUD (using the same shadow-state HUD-start
+				// signature v38.2 uses for the fullMirror flip).
+				if (mirror_rtt::dof_is_active())
+				{
+					if (mirror_rtt::g_in_segment) mirror_rtt::end_segment(m_pIDirect3DDevice9);
+					mirror_rtt::g_pending_hud_start_composite = true;
+				}
+				else
+				{
 				const int tonemap_inject = dvars::r_mirrorViewmodel_rttTonemapInject
 					? dvars::r_mirrorViewmodel_rttTonemapInject->current.integer : 1;
 				if (tonemap_inject && mirror_rtt::inject_into_tonemap_source(m_pIDirect3DDevice9))
@@ -2788,6 +2912,7 @@ namespace components
 					mirror_rtt::g_pending_early_composite = true;
 					// v35.10 diagnostic: inject failed -> fallback active
 					++mirror_hud::g_inj_fail_this_frame;
+				}
 				}
 			}
 		}

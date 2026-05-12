@@ -2095,6 +2095,27 @@ volatile bool _renderer::gun_seen_this_present = false;
 			/* maxVal	*/ 1,
 			/* flags	*/ game::dvar_flags::saved);
 
+		// v39: workaround for gun disappearing under r_dof_tweak / r_dof_enable.
+		// Engine's DOF post-FX runs AFTER tonemap but BEFORE HUD; it reads
+		// main DSV depth and (because r_mirrorViewmodel_depthFix wrote z=0
+		// at gun pixels for MXAO/SSAO) treats every gun pixel as "infinitely
+		// out of focus", blurring the gun into the background and making it
+		// invisible. When mode > 0 the gun-RTT composite is deferred past the
+		// DOF pass to the HUD-start signal (same hook v38.2 uses for the
+		// r_fullMirror flip), so DOF sees only the world and the gun is then
+		// painted on top -- matching the engine's own late-viewmodel ordering
+		// when r_mirrorViewmodel_rtt=0. Trade-off: the gun no longer receives
+		// the engine's filmtweak/tonemap curve in this path; very extreme
+		// r_filmTweakBrightness / r_contrast / r_desaturation values may show
+		// a subtle tone difference between gun and world.
+		dvars::r_mirrorViewmodel_dofWorkaround = game::Dvar_RegisterInt(
+			/* name		*/ "r_mirrorViewmodel_dofWorkaround",
+			/* desc		*/ "v39: avoid gun-pixels being erased by the engine's depth-of-field post-FX. The engine's DOF pass runs AFTER tonemap but BEFORE HUD and reads main DSV depth (which v33 depth-fix wrote z=0 at gun pixels for MXAO/SSAO), so it treats gun pixels as 'extremely out of focus' and blurs them with neighbouring wall samples until the gun is invisible. This dvar defers the gun-RTT composite past the DOF pass when active. 0 = off (original v25 inject path; gun disappears under r_dof_tweak / r_dof_enable+ADS). 1 = check r_dof_tweak >= 1 only (default; fixes r_dof_tweak without ever bypassing filmtweak in non-DOF frames). 2 = check r_dof_tweak OR r_dof_enable >= 1 (also fixes r_dof_enable+ADS gun disappearing, at the cost of bypassing filmtweak on the gun in non-ADS frames when r_dof_enable defaults to 1). 3 = always defer (force late composite unconditionally; for diagnostics).",
+			/* default	*/ 1,
+			/* minVal	*/ 0,
+			/* maxVal	*/ 3,
+			/* flags	*/ game::dvar_flags::saved);
+
 		// v34: r_hudMirror = HUD-only horizontal mirror via 2D-ortho VSCF
 		// flip. Use case: combine with ReShade's Flip.fx (which mirrors the
 		// entire final back-buffer including HUD). With Flip.fx alone the HUD
