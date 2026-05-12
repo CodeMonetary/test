@@ -1164,10 +1164,12 @@ namespace components
 	// ----------------------------------------------------------------------
 	namespace mirror_blur_diag
 	{
-		static int g_frame_no            = 0;   // increments on Present
+		static int g_frame_no            = 0;   // increments on Present (or EndScene fallback)
 		static int g_call_no_in_frame    = 0;   // increments on each instrumented call
 		static int g_log_lines_this_frame = 0;  // capped to avoid spam
-		static constexpr int kMaxLinesPerFrame = 400;
+		static bool g_present_seen_this_frame = false;  // dedupe Present/EndScene fallback
+		static bool g_post_flip_this_frame    = false;  // gates verbose per-draw at level 2
+		static constexpr int kMaxLinesPerFrame = 2000;  // bumped: level=2 needs headroom
 
 		static inline int log_level()
 		{
@@ -1175,10 +1177,11 @@ namespace components
 			return dvars::r_mirrorViewmodel_logBlur->current.integer;
 		}
 
-		static inline int r_blur_value()
+		// r_blur is a float dvar in iw3; report it as float so 0.5 doesn't look like 0.
+		static inline float r_blur_value()
 		{
 			game::dvar_s* d = game::Dvar_FindVar("r_blur");
-			return (d ? d->current.integer : 0);
+			return (d ? d->current.value : 0.0f);
 		}
 
 		static inline int r_fullMirror_value()
@@ -1189,6 +1192,11 @@ namespace components
 		static void log_event_str(const char* tag, const char* body)
 		{
 			if (log_level() <= 0) return;
+			// flipBB / flipDSV mark the moment our v36 flip ran; level=2
+			// per-draw log uses this latch to ONLY log draws that happen
+			// AFTER the flip (those are the candidates for r_blur ghosting).
+			if (tag && tag[0] == 'f' && tag[1] == 'l' && tag[2] == 'i' && tag[3] == 'p')
+				g_post_flip_this_frame = true;
 			if (g_log_lines_this_frame >= kMaxLinesPerFrame) return;
 			++g_log_lines_this_frame;
 			++g_call_no_in_frame;
@@ -1196,23 +1204,39 @@ namespace components
 				g_frame_no, g_call_no_in_frame, tag, body ? body : ""), 0);
 		}
 
-		static void on_present()
+		// frame boundary. Called from Present() AND from EndScene() (fallback,
+		// because some iw3 dispatch paths route Present() around our wrapper).
+		// The first call per frame emits the marker + advances frame counter;
+		// subsequent calls within the same frame no-op.
+		static void on_present(const char* site)
 		{
+			if (g_present_seen_this_frame) return;
+			g_present_seen_this_frame = true;
 			if (log_level() > 0)
 			{
 				game::Com_PrintMessage(0, utils::va(
-					"[blur] === present frame=%d r_blur=%d r_fullMirror=%d events=%d ===\n",
-					g_frame_no, r_blur_value(), r_fullMirror_value(),
+					"[blur] === present frame=%d site=%s r_blur=%g r_fullMirror=%d events=%d ===\n",
+					g_frame_no, site ? site : "?", r_blur_value(), r_fullMirror_value(),
 					g_call_no_in_frame), 0);
 			}
 			++g_frame_no;
 			g_call_no_in_frame    = 0;
 			g_log_lines_this_frame = 0;
+			g_post_flip_this_frame = false;
+		}
+
+		// reset the per-frame "present seen" flag at frame start (BeginScene).
+		static void on_begin_scene()
+		{
+			g_present_seen_this_frame = false;
 		}
 
 		static void log_draw(IDirect3DDevice9* dev, const char* api, UINT primCount, UINT numVerts)
 		{
 			if (log_level() < 2) return;
+			// only log draws AFTER our v36 flip fired this frame --
+			// pre-flip draws are not interesting for the r_blur ghost.
+			if (!g_post_flip_this_frame) return;
 			if (g_log_lines_this_frame >= kMaxLinesPerFrame) return;
 			IDirect3DBaseTexture9* tex0 = nullptr;
 			if (dev) dev->GetTexture(0, &tex0);
@@ -1347,7 +1371,7 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::Present(CONST RECT* pSourceRect, CONST RECT* pDestRect, HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion)
 	{
-		mirror_blur_diag::on_present();
+		mirror_blur_diag::on_present("Present");
 		// r_mirrorViewmodel: clear the viewmodel flag at frame boundary so next
 		// frame's world pass isn't rendered with inverted culling.
 		// NOTE: EndScene owns the dump-frame counter. Some IW3 dispatch paths route
@@ -1520,6 +1544,9 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::BeginScene()
 	{
+		// v38 diag: reset per-frame "present seen" latch so the very first
+		// EndScene/Present after this BeginScene re-emits the boundary marker.
+		mirror_blur_diag::on_begin_scene();
 		// r_mirrorViewmodel: belt-and-suspenders; ensure flag is clear at frame start
 		// so the world pass (first after BeginScene) renders with normal culling.
 		_renderer::mirror_viewmodel_active = false;
@@ -1833,6 +1860,13 @@ namespace components
 			else            { m_pIDirect3DDevice9->SetDepthStencilSurface(nullptr); }
 		}
 
+		// v38 diag: per-frame boundary fallback. Some iw3 dispatch paths
+		// route Present() around our wrapper. EndScene always reaches us;
+		// on_present() dedupes internally so we won't double-count when
+		// Present is also reached. This must be the LAST instrumented line
+		// in EndScene so all per-frame events are attributed to the closing
+		// frame, not the next one.
+		mirror_blur_diag::on_present("EndScene");
 		return m_pIDirect3DDevice9->EndScene();
 	}
 
