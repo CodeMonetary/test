@@ -97,6 +97,18 @@ namespace components
 		static int  g_flip_w                     = 0;
 		static int  g_flip_h                     = 0;
 		static bool g_pending_fullmirror_flip    = false; // set on PSCF c7 fingerprint when fullMirror==1; fires AFTER the next draw
+		// v38: deferred (HUD-gated) flip path. When r_blur > 0 the engine
+		// runs ~4 motion-blur composite draws AFTER the tonemap pass but
+		// BEFORE the HUD pass. Those draws read from blur history textures
+		// captured pre-flip, so compositing them onto the already-flipped
+		// BB produces a non-mirrored ghost layer (visible at r_fullMirror==1).
+		// Fix: when r_blur != 0, ARM on PSCF c7 like before, but defer
+		// firing until the first SetRenderState(D3DRS_ALPHATESTENABLE, TRUE)
+		// after arming -- that is the engine's HUD-start signal in iw3
+		// (post-FX quads run with alpha-test disabled, real HUD enables it).
+		// If EndScene fires without HUD ever arriving, flush in EndScene
+		// as a fallback (matches r_fullMirror==2 behaviour for that frame).
+		static bool g_pending_fullmirror_flip_hud_gated = false;
 
 		// v37.2: pixel-shader-pointer cache for the engine's post-FX tonemap pass.
 		// Latched on the FIRST successful structural match; used as a fallback
@@ -915,6 +927,7 @@ namespace components
 			g_in_segment             = false;
 			g_pending_early_composite = false;
 			g_pending_fullmirror_flip = false;
+			g_pending_fullmirror_flip_hud_gated = false; // v38: blur fix
 			g_tonemap_ps_cache       = nullptr; // v37.2: weak ref, drop on device reset
 			release_targets();
 			release_flip_target();
@@ -1709,6 +1722,21 @@ namespace components
 			}
 		}
 
+		// v38: EndScene fallback for the HUD-gated fullMirror flip path.
+		// If we armed the HUD-gated flip earlier (r_blur != 0 && r_fullMirror == 1)
+		// and the frame ended without an ALPHATESTENABLE=TRUE ever firing
+		// (e.g. menu/console frame with no HUD draws), the BB would otherwise
+		// stay un-mirrored. Flush the deferred flip here as a last resort
+		// so the user always sees the mirrored world for this frame.
+		if (mirror_rtt::g_pending_fullmirror_flip_hud_gated)
+		{
+			mirror_rtt::g_pending_fullmirror_flip_hud_gated = false;
+			if (mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9))
+			{
+				mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
+			}
+		}
+
 		// v33 (ported from cod4mirror): clear our off-screen RTT
 		// depth-stencil to far at end of every frame. ReShade's
 		// Generic Depth addon scans D3D9 CreateDepthStencilSurface
@@ -1862,6 +1890,22 @@ namespace components
 					mirror_hud::g_alphatest_fires_this_frame,
 					mirror_hud::g_begin_calls_this_frame), 0);
 			}
+		}
+
+		// v38: HUD-gated fullMirror flip fire. Same trigger as the HUD-RTT
+		// capture above -- D3DRS_ALPHATESTENABLE=TRUE marks the transition
+		// from post-FX/blur quads (alpha-test disabled) to real HUD draws
+		// (alpha-test enabled). Firing the BB flip here means it lands
+		// AFTER the motion-blur composite (which reads from history textures
+		// captured pre-flip) but BEFORE HUD, preserving the r_fullMirror==1
+		// contract that HUD stays un-mirrored.
+		if (State == D3DRS_ALPHATESTENABLE && Value
+			&& mirror_rtt::g_pending_fullmirror_flip_hud_gated)
+		{
+			mirror_rtt::g_pending_fullmirror_flip_hud_gated = false;
+			const bool flip_ok = mirror_rtt::do_fullscreen_flip(m_pIDirect3DDevice9);
+			if (flip_ok)
+				mirror_rtt::do_main_depth_flip_if_enabled(m_pIDirect3DDevice9);
 		}
 		// v35.20: SetRenderState override removed -- v35.19 log showed
 		// ablend_ovr=0 every frame because the engine sets SRCBLENDALPHA
@@ -2683,7 +2727,21 @@ namespace components
 				// also survives extreme r_contrast / r_desaturation values.
 				const bool is_pre_hud_signal = mirror_rtt::match_tonemap_signal(
 					m_pIDirect3DDevice9, c70, c71, c72, c73);
-				if (is_pre_hud_signal) mirror_rtt::g_pending_fullmirror_flip = true;
+				if (is_pre_hud_signal)
+				{
+					// v38: when motion blur is enabled, route the flip through
+					// the HUD-gated path so it fires AFTER the blur composite
+					// (which runs between tonemap and HUD). Without this gate
+					// the flip lands BEFORE blur composite -> blur draws from
+					// pre-flip history textures and produces a non-mirrored
+					// ghost layer over the flipped BB.
+					game::dvar_s* d_blur = game::Dvar_FindVar("r_blur");
+					const bool blur_on = d_blur && d_blur->current.value > 0.0f;
+					if (blur_on)
+						mirror_rtt::g_pending_fullmirror_flip_hud_gated = true;
+					else
+						mirror_rtt::g_pending_fullmirror_flip = true;
+				}
 			}
 		}
 
