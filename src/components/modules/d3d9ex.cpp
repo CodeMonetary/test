@@ -1171,6 +1171,9 @@ namespace components
 		static bool g_post_flip_this_frame    = false;  // gates verbose per-draw at level 2
 		static constexpr int kMaxLinesPerFrame = 2000;  // bumped: level=2 needs headroom
 
+		// forward declaration (definition below alongside SRS trackers).
+		static void srs_reset_for_frame();
+
 		static inline int log_level()
 		{
 			if (!dvars::r_mirrorViewmodel_logBlur) return 0;
@@ -1229,6 +1232,10 @@ namespace components
 		static void on_begin_scene()
 		{
 			g_present_seen_this_frame = false;
+			// v38.1: invalidate SRS last-value cache so we always log the
+			// first state set after each BeginScene (even if value matches
+			// last frame's final value).
+			srs_reset_for_frame();
 		}
 
 		static void log_draw(IDirect3DDevice9* dev, const char* api, UINT primCount, UINT numVerts)
@@ -1246,6 +1253,72 @@ namespace components
 				api, primCount, numVerts, (void*)tex0, (void*)ps));
 			if (tex0) tex0->Release();
 			if (ps)   ps->Release();
+		}
+
+		// v38.1 diagnostic: SetRenderState change tracker. iw3 spams the same
+		// render state many times per frame, so we only log when the value
+		// CHANGES. Goal: identify a uniquely-HUD-start render-state signal
+		// (PR #8 assumed ALPHATESTENABLE=TRUE was unique to HUD start, but
+		// motion-blur composite seems to toggle it too -- need to see which
+		// state(s) actually flip ONLY at HUD boundary when blur is active).
+		struct srs_last_t { DWORD value; bool valid; };
+		static srs_last_t g_srs_last_alphatest    = {0, false};
+		static srs_last_t g_srs_last_alphablend   = {0, false};
+		static srs_last_t g_srs_last_zenable      = {0, false};
+		static srs_last_t g_srs_last_zwriteenable = {0, false};
+		static srs_last_t g_srs_last_srcblend     = {0, false};
+		static srs_last_t g_srs_last_destblend    = {0, false};
+		static srs_last_t g_srs_last_cullmode     = {0, false};
+
+		static void log_srs(const char* name, srs_last_t& slot, DWORD value)
+		{
+			if (log_level() <= 0) return;
+			if (slot.valid && slot.value == value) return; // no change -> skip
+			slot.value = value; slot.valid = true;
+			log_event_str("SRS", utils::va("%s=%u", name, (unsigned)value));
+		}
+
+		static void on_set_render_state(D3DRENDERSTATETYPE State, DWORD Value)
+		{
+			if (log_level() <= 0) return;
+			switch (State)
+			{
+			case D3DRS_ALPHATESTENABLE:   log_srs("ALPHATESTENABLE",  g_srs_last_alphatest,    Value); break;
+			case D3DRS_ALPHABLENDENABLE:  log_srs("ALPHABLENDENABLE", g_srs_last_alphablend,   Value); break;
+			case D3DRS_ZENABLE:           log_srs("ZENABLE",          g_srs_last_zenable,      Value); break;
+			case D3DRS_ZWRITEENABLE:      log_srs("ZWRITEENABLE",     g_srs_last_zwriteenable, Value); break;
+			case D3DRS_SRCBLEND:          log_srs("SRCBLEND",         g_srs_last_srcblend,     Value); break;
+			case D3DRS_DESTBLEND:         log_srs("DESTBLEND",        g_srs_last_destblend,    Value); break;
+			case D3DRS_CULLMODE:          log_srs("CULLMODE",         g_srs_last_cullmode,     Value); break;
+			default: break;
+			}
+		}
+
+		// per-frame reset for SRS tracking. Call from on_begin_scene so the
+		// first state set after a new frame still gets logged even if it
+		// happens to equal last frame's final value.
+		static void srs_reset_for_frame()
+		{
+			g_srs_last_alphatest.valid    = false;
+			g_srs_last_alphablend.valid   = false;
+			g_srs_last_zenable.valid      = false;
+			g_srs_last_zwriteenable.valid = false;
+			g_srs_last_srcblend.valid     = false;
+			g_srs_last_destblend.valid    = false;
+			g_srs_last_cullmode.valid     = false;
+		}
+
+		// stage-0 texture tracker. Only logs on CHANGE, only AFTER flipBB
+		// (post-flip phase is where the ghost is generated -- pre-flip
+		// stage-0 sets are noise from world rendering).
+		static IDirect3DBaseTexture9* g_last_tex0 = nullptr;
+		static void on_set_texture0(IDirect3DBaseTexture9* tex)
+		{
+			if (log_level() < 2) return;
+			if (!g_post_flip_this_frame) return;
+			if (tex == g_last_tex0) return;
+			g_last_tex0 = tex;
+			log_event_str("Tex0", utils::va("tex=%p", (void*)tex));
 		}
 
 		static const char* describe_surface(IDirect3DSurface9* surf)
@@ -1942,6 +2015,10 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetRenderState(D3DRENDERSTATETYPE State, DWORD Value)
 	{
+		// v38.1 diagnostic: log render-state changes that may indicate
+		// HUD-start vs blur-composite boundary.
+		mirror_blur_diag::on_set_render_state(State, Value);
+
 		// v35.2: HUD-RTT capture fire. ALPHATESTENABLE=TRUE is the strong
 		// HUD-start signal in iw3 - post-FX quads (tonemap, color grade,
 		// additive glow) all run with alpha-test disabled, while real HUD
@@ -2088,6 +2165,12 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetTexture(DWORD Stage, IDirect3DBaseTexture9* pTexture)
 	{
+		// v38.1 diagnostic: log stage-0 texture changes after our v36 flip
+		// (level >= 2). Reveals which source textures feed the blur
+		// composite draws that produce the ghost.
+		if (Stage == 0)
+			mirror_blur_diag::on_set_texture0(pTexture);
+
 		// v35.15: classify stage-0 texture as 'big RT' (e.g. scene RT used
 		// by the damage/death post-FX pass). Drives the narrowed shader-
 		// escape in Draw[Indexed]Primitive. Normal HUD textures are
