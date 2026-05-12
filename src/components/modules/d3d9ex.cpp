@@ -1558,6 +1558,31 @@ namespace components
 		mirror_hud::g_shader_escapes_this_frame              = 0;     // v35.15
 		mirror_hud::g_logged_first_shader_escape_this_frame  = false; // v35.15
 
+		// v40: arm the HUD-gated fullscreen flip path for r_fullMirror==1
+		// unconditionally at frame start. Some CoD4 mods (e.g. those that
+		// also replace viewmodel xmodel + ship custom post-FX) suppress the
+		// engine's tonemap pass entirely - the PSCF c7 fingerprint
+		// (-0.066,-0.066,-0.066, 2.773585) we rely on for v37/v38 arming is
+		// never uploaded under those mods, so the immediate (r_blur=0) and
+		// HUD-gated (r_blur>0) arming sites at SetPixelShaderConstantF both
+		// no-op and r_fullMirror 1 silently does nothing while r_fullMirror 2
+		// (EndScene unconditional flip) still works. Arming hud_gated here
+		// guarantees the flip path is primed for every frame; the v38.2
+		// HUD-start signature fires it just before HUD draws, or the
+		// EndScene fallback fires it if no HUD this frame.
+		// In vanilla this is REDUNDANT with the PSCF c7 arming sites: for
+		// r_blur=0 the c7 site sets g_pending_fullmirror_flip (immediate
+		// fire) which clears this hud_gated flag on fire, preserving the
+		// v36 post-tonemap-draw flip timing; for r_blur>0 the c7 site
+		// re-sets the same hud_gated flag (idempotent).
+		{
+			const int full_mirror_bs = dvars::r_fullMirror
+				? dvars::r_fullMirror->current.integer : 0;
+			if (full_mirror_bs == 1) {
+				mirror_rtt::g_pending_fullmirror_flip_hud_gated = true;
+			}
+		}
+
 		++s_hudlog_frame;
 
 		if (_renderer::mirror_dump_active())
@@ -2242,6 +2267,10 @@ namespace components
 		if (mirror_rtt::g_pending_fullmirror_flip)
 		{
 			mirror_rtt::g_pending_fullmirror_flip = false;
+			// v40: clear v40 BeginScene-armed hud_gated flag so we don't
+			// double-flip when both immediate and hud_gated were armed in
+			// the same frame (vanilla case: PSCF c7 detect path).
+			mirror_rtt::g_pending_fullmirror_flip_hud_gated = false;
 			// v36: only flip main DSV when the color flip itself succeeded.
 			// If the color flip failed, leaving depth untouched keeps color
 			// and depth in sync. HUD draws after this point but uses
@@ -2315,6 +2344,10 @@ namespace components
 		if (mirror_rtt::g_pending_fullmirror_flip)
 		{
 			mirror_rtt::g_pending_fullmirror_flip = false;
+			// v40: clear v40 BeginScene-armed hud_gated flag so we don't
+			// double-flip when both immediate and hud_gated were armed in
+			// the same frame (vanilla case: PSCF c7 detect path).
+			mirror_rtt::g_pending_fullmirror_flip_hud_gated = false;
 			// v36: only flip main DSV when the color flip itself succeeded.
 			// If the color flip failed, leaving depth untouched keeps color
 			// and depth in sync. HUD draws after this point but uses
