@@ -97,17 +97,32 @@ namespace components
 		static int  g_flip_w                     = 0;
 		static int  g_flip_h                     = 0;
 		static bool g_pending_fullmirror_flip    = false; // set on PSCF c7 fingerprint when fullMirror==1; fires AFTER the next draw
-		// v38: deferred (HUD-gated) flip path. When r_blur > 0 the engine
-		// runs ~4 motion-blur composite draws AFTER the tonemap pass but
-		// BEFORE the HUD pass. Those draws read from blur history textures
-		// captured pre-flip, so compositing them onto the already-flipped
-		// BB produces a non-mirrored ghost layer (visible at r_fullMirror==1).
-		// Fix: when r_blur != 0, ARM on PSCF c7 like before, but defer
-		// firing until the first SetRenderState(D3DRS_ALPHATESTENABLE, TRUE)
-		// after arming -- that is the engine's HUD-start signal in iw3
-		// (post-FX quads run with alpha-test disabled, real HUD enables it).
-		// If EndScene fires without HUD ever arriving, flush in EndScene
-		// as a fallback (matches r_fullMirror==2 behaviour for that frame).
+		// v38.2: deferred (HUD-start-gated) flip path. When r_blur > 0 the
+		// engine runs ~4 motion-blur composite draws AFTER the tonemap pass
+		// but BEFORE the HUD pass. Those draws read from blur history
+		// textures captured pre-flip, so compositing them onto the already-
+		// flipped BB produces a non-mirrored ghost layer (visible at
+		// r_fullMirror==1).
+		//
+		// v38 (PR #8) tried to fire the deferred flip on the first
+		// D3DRS_ALPHATESTENABLE=TRUE after PSCF c7. That was wrong: the
+		// motion-blur composite *also* toggles ALPHATESTENABLE on/off
+		// (confirmed by PR #7 v38.1 diagnostic logs), so the flip fired
+		// inside the blur composite -- BEFORE the harmful draws -- and
+		// produced no benefit.
+		//
+		// v38.2: the engine's real HUD-start in iw3 is not just "ATE=1" but
+		// a 4-state SEQUENCE that always appears together at HUD-start and
+		// never appears together during blur composite or post-FX:
+		//     CULLMODE=1, ALPHABLENDENABLE=1, SRCBLEND=2, ALPHATESTENABLE=1
+		// All four are set within consecutive SetRenderState calls right
+		// before HUD draws begin. We shadow-track CULL/ABE/SB and watch
+		// for the ATE 0->1 transition; if the shadow state matches the
+		// HUD signature at that moment, this is real HUD-start.
+		//
+		// If EndScene fires without HUD ever arriving (menu / console with
+		// no HUD), flush in EndScene as a fallback (matches r_fullMirror==2
+		// behaviour for that frame).
 		static bool g_pending_fullmirror_flip_hud_gated = false;
 
 		// v37.2: pixel-shader-pointer cache for the engine's post-FX tonemap pass.
@@ -932,6 +947,59 @@ namespace components
 			release_targets();
 			release_flip_target();
 			release_depth_flip_resources();
+		}
+	}
+
+	// ----------------------------------------------------------------------
+	// v38.2: HUD-start detector. Shadows the four render states whose joint
+	// transition uniquely identifies the engine's HUD-pass start in iw3:
+	//
+	//     CULLMODE=1, ALPHABLENDENABLE=1, SRCBLEND=2, ALPHATESTENABLE=1 (rising)
+	//
+	// PR #7 diagnostic logs confirmed this signature is present at HUD-start
+	// in BOTH r_blur=0 and r_blur=1 frames, and is NOT present at any of the
+	// motion-blur composite ATE rising edges (those happen with CULL=3,
+	// ABE=0, SB=5 from the immediately preceding post-FX/blur pass). This
+	// is what replaces v38's broken "first ATE=1 after PSCF c7" trigger.
+	//
+	// Behaviour: observe() is called for every SetRenderState. Internally
+	// it updates the shadow value for CULL/ABE/SB/ATE. When ATE rises
+	// 0 -> 1 and the other three shadows are exactly the HUD-start values,
+	// observe() returns true once for that transition.
+	//
+	// No per-frame reset is needed: the engine sets ATE/CULL/ABE/SB many
+	// times per frame, so the shadow values follow the engine reliably.
+	// ----------------------------------------------------------------------
+	namespace hud_start_detect
+	{
+		static DWORD g_shadow_cull = 3;  // D3DCULL_CW default
+		static DWORD g_shadow_abe  = 0;
+		static DWORD g_shadow_sb   = D3DBLEND_ONE;
+		static DWORD g_shadow_ate  = 0;
+
+		// observe a SetRenderState call BEFORE it is forwarded to the
+		// device. returns true iff this call is the ATE 0->1 rising edge
+		// that completes the HUD-start signature.
+		static bool observe(D3DRENDERSTATETYPE State, DWORD Value)
+		{
+			bool fired = false;
+			switch (State)
+			{
+			case D3DRS_CULLMODE:         g_shadow_cull = Value; break;
+			case D3DRS_ALPHABLENDENABLE: g_shadow_abe  = Value; break;
+			case D3DRS_SRCBLEND:         g_shadow_sb   = Value; break;
+			case D3DRS_ALPHATESTENABLE:
+				if (Value != 0 && g_shadow_ate == 0)
+				{
+					fired = (g_shadow_cull == 1
+						&& g_shadow_abe != 0
+						&& g_shadow_sb == 2);
+				}
+				g_shadow_ate = Value;
+				break;
+			default: break;
+			}
+			return fired;
 		}
 	}
 
@@ -1840,6 +1908,13 @@ namespace components
 
 	HRESULT d3d9ex::D3D9Device::SetRenderState(D3DRENDERSTATETYPE State, DWORD Value)
 	{
+		// v38.2: shadow-state HUD-start detector observes ALL SetRenderState
+		// calls and returns true exactly once per frame on the iw3 HUD-start
+		// signature (CULLMODE=1, ALPHABLENDENABLE=1, SRCBLEND=2, then ATE 0->1).
+		// This replaces v38's broken "first ATE=1 after PSCF c7" trigger which
+		// also fired inside the motion-blur composite.
+		const bool hud_start_fired = hud_start_detect::observe(State, Value);
+
 		// v35.2: HUD-RTT capture fire. ALPHATESTENABLE=TRUE is the strong
 		// HUD-start signal in iw3 - post-FX quads (tonemap, color grade,
 		// additive glow) all run with alpha-test disabled, while real HUD
@@ -1875,7 +1950,14 @@ namespace components
 		// On the firing side just fire on the next ALPHATESTENABLE=TRUE,
 		// which by construction is the start of the real HUD pass
 		// (post-FX quads in iw3 run with alpha-test disabled).
-		if (State == D3DRS_ALPHATESTENABLE && Value
+		//
+		// v38.2: replace bare "ATE=TRUE" with the shadow-state HUD signature.
+		// Without this, motion-blur composite (which sets ATE=1 briefly)
+		// would start HUD-RTT capture too early -- HUD-RTT then catches the
+		// blur composite draws AND the HUD, and composite() flips both, so
+		// the mirrored blur layer ends up on screen (ghost). User saw this
+		// at r_hudMirror==1 + r_blur==1.
+		if (hud_start_fired
 			&& mirror_hud::g_capture_armed && !mirror_hud::g_active)
 		{
 			mirror_hud::g_capture_armed = false;
@@ -1892,14 +1974,14 @@ namespace components
 			}
 		}
 
-		// v38: HUD-gated fullMirror flip fire. Same trigger as the HUD-RTT
-		// capture above -- D3DRS_ALPHATESTENABLE=TRUE marks the transition
-		// from post-FX/blur quads (alpha-test disabled) to real HUD draws
-		// (alpha-test enabled). Firing the BB flip here means it lands
-		// AFTER the motion-blur composite (which reads from history textures
-		// captured pre-flip) but BEFORE HUD, preserving the r_fullMirror==1
-		// contract that HUD stays un-mirrored.
-		if (State == D3DRS_ALPHATESTENABLE && Value
+		// v38.2: HUD-start-gated fullMirror flip fire (re-using the same
+		// shadow-state HUD-start signal as r_hudMirror, computed at top of
+		// this function). Firing the BB flip here means it lands AFTER the
+		// motion-blur composite (which reads from history textures captured
+		// pre-flip) but BEFORE HUD, preserving the r_fullMirror==1 contract
+		// that HUD stays un-mirrored. v38 (PR #8) used bare ATE=TRUE here
+		// and so fired inside the blur composite -- this fixes that.
+		if (hud_start_fired
 			&& mirror_rtt::g_pending_fullmirror_flip_hud_gated)
 		{
 			mirror_rtt::g_pending_fullmirror_flip_hud_gated = false;
