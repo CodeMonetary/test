@@ -764,7 +764,8 @@ namespace
 
 	// ----------------------------------------------------------------------
 	// hud_start_detect :: 4-state HUD-start signature observer.
-	// Verbatim port of MP v38.2 d3d9ex.cpp lines 973-1004.
+	// Verbatim port of MP v38.2 d3d9ex.cpp lines 973-1004 plus extended
+	// SP-specific render-state shadows for diagnostic dumps.
 	// ----------------------------------------------------------------------
 	namespace hud_start_detect
 	{
@@ -772,6 +773,19 @@ namespace
 		static DWORD g_shadow_abe  = 0;
 		static DWORD g_shadow_sb   = D3DBLEND_ONE;
 		static DWORD g_shadow_ate  = 0;
+		// extra shadows for r_mirrorViewmodel_log >= 2 dump
+		static DWORD g_shadow_db   = D3DBLEND_ZERO;
+		static DWORD g_shadow_sba  = D3DBLEND_ONE;
+		static DWORD g_shadow_dba  = D3DBLEND_ZERO;
+		static DWORD g_shadow_ze   = 1;
+		static DWORD g_shadow_zw   = 1;
+		static DWORD g_shadow_fill = D3DFILL_SOLID;
+
+		// Set by the PSCF c7 tonemap fingerprint to gate the diagnostic
+		// window.  Reset on BeginScene so we only dump the post-tonemap-
+		// to-HUD-start interval per frame.
+		static bool g_diag_window_open = false;
+		static int  g_diag_ate_rise_seen = 0;
 
 		static bool observe(D3DRENDERSTATETYPE State, DWORD Value)
 		{
@@ -781,18 +795,61 @@ namespace
 			case D3DRS_CULLMODE:         g_shadow_cull = Value; break;
 			case D3DRS_ALPHABLENDENABLE: g_shadow_abe  = Value; break;
 			case D3DRS_SRCBLEND:         g_shadow_sb   = Value; break;
+			case D3DRS_DESTBLEND:        g_shadow_db   = Value; break;
+			case D3DRS_SRCBLENDALPHA:    g_shadow_sba  = Value; break;
+			case D3DRS_DESTBLENDALPHA:   g_shadow_dba  = Value; break;
+			case D3DRS_ZENABLE:          g_shadow_ze   = Value; break;
+			case D3DRS_ZWRITEENABLE:     g_shadow_zw   = Value; break;
+			case D3DRS_FILLMODE:         g_shadow_fill = Value; break;
 			case D3DRS_ALPHATESTENABLE:
 				if (Value != 0 && g_shadow_ate == 0)
 				{
 					fired = (g_shadow_cull == 1
 						&& g_shadow_abe != 0
 						&& g_shadow_sb == 2);
+
+					// Diagnostic dump: print full RS snapshot on every ATE
+					// rising edge while the post-tonemap window is open and
+					// the user enabled log >= 2.  Limited to first 8 per frame
+					// so we don't flood console.
+					if (g_diag_window_open
+						&& g_diag_ate_rise_seen < 8
+						&& mirror_log_level() >= 2)
+					{
+						++g_diag_ate_rise_seen;
+						char buf[256];
+						_snprintf_s(buf, sizeof(buf),
+							"[mirror:hud-diag] ate-rise #%d  cull=%lu abe=%lu sb=%lu db=%lu sba=%lu dba=%lu ze=%lu zw=%lu fill=%lu  matched=%d\n",
+							g_diag_ate_rise_seen,
+							(unsigned long)g_shadow_cull,
+							(unsigned long)g_shadow_abe,
+							(unsigned long)g_shadow_sb,
+							(unsigned long)g_shadow_db,
+							(unsigned long)g_shadow_sba,
+							(unsigned long)g_shadow_dba,
+							(unsigned long)g_shadow_ze,
+							(unsigned long)g_shadow_zw,
+							(unsigned long)g_shadow_fill,
+							(int)fired);
+						engine_print(buf);
+					}
 				}
 				g_shadow_ate = Value;
 				break;
 			default: break;
 			}
 			return fired;
+		}
+
+		static void open_diag_window()
+		{
+			g_diag_window_open   = true;
+			g_diag_ate_rise_seen = 0;
+		}
+
+		static void close_diag_window()
+		{
+			g_diag_window_open = false;
 		}
 	} // namespace hud_start_detect
 
@@ -825,6 +882,7 @@ void OnBeginScene(IDirect3DDevice9* /*dev*/)
 	mirror_rtt::g_end_seg_count_this_frame   = 0;
 	mirror_rtt::g_inject_calls_this_frame    = 0;
 	mirror_rtt::g_inject_ok_count_this_frame = 0;
+	hud_start_detect::close_diag_window();
 	++s_frame_counter;
 }
 
@@ -1061,21 +1119,47 @@ void OnSetPixelShaderConstantF(IDirect3DDevice9* dev,
 			const bool is_pre_hud_signal = mirror_rtt::match_tonemap_signal(dev, c70, c71, c72, c73);
 			if (is_pre_hud_signal)
 			{
-				// SP campaign triggers extra post-FX composites during damage
-				// (hurt overlay, low-health screen tint, hit-direction blur,
-				// damage-cam shake) that sit between the tonemap pass and the
-				// HUD pass -- same shape as the v38 r_blur ghost-layer bug,
-				// but without raising the r_blur dvar.  v38.2 only gated on
-				// r_blur > 0 so the SP damage-triggered composites slipped
-				// through the post-DRAW path and produced the un-mirrored
-				// flicker over the gun whenever the player took damage.
-				//
-				// In SP we always route through the HUD-gated path; the
-				// 4-state HUD-start signature is the reliable end-of-post-FX
-				// boundary regardless of which optional layers are active.
-				// EndScene fallback still covers menu/console frames where
-				// HUD never starts.
-				mirror_rtt::g_pending_fullmirror_flip_hud_gated = true;
+				// Open the diagnostic window so hud_start_detect::observe
+				// dumps RS snapshots for the post-tonemap interval when
+				// r_mirrorViewmodel_log >= 2.  Used to reverse-engineer the
+				// SP HUD-start signature (MP v38.2's 4-state sig fails to
+				// fire in SP, so we cannot gate on it yet).
+				hud_start_detect::open_diag_window();
+
+				// Gating mode selector:
+				//   r_fullMirror_gateMode 0 (default) = v38.2 MP behaviour:
+				//      post-DRAW when r_blur == 0, HUD-gated when r_blur > 0.
+				//      Works for normal frames but the SP damage-overlay
+				//      composite (not r_blur-driven) ghosts over the gun.
+				//   r_fullMirror_gateMode 1 = always HUD-gated.  Damage
+				//      stable but HUD also gets mirrored (EndScene fallback
+				//      fires every frame because the SP HUD-start signature
+				//      does not match v38.2's 4-state pattern yet).
+				//   r_fullMirror_gateMode 2 = always post-DRAW (v37 path).
+				//      Damage breaks but no HUD-flip ever happens.
+				const int gate_mode = Dvars::r_fullMirror_gateMode
+					? Dvars::r_fullMirror_gateMode->current.integer : 0;
+
+				bool use_hud_gated = false;
+				if (gate_mode == 1)
+				{
+					use_hud_gated = true;
+				}
+				else if (gate_mode == 2)
+				{
+					use_hud_gated = false;
+				}
+				else
+				{
+					Game::dvar_s* d_blur = Dvars::Functions::Dvar_FindVar
+						? Dvars::Functions::Dvar_FindVar("r_blur") : nullptr;
+					use_hud_gated = d_blur && d_blur->current.value > 0.0f;
+				}
+
+				if (use_hud_gated)
+					mirror_rtt::g_pending_fullmirror_flip_hud_gated = true;
+				else
+					mirror_rtt::g_pending_fullmirror_flip = true;
 			}
 		}
 	}

@@ -446,6 +446,10 @@ namespace Components
 				"r_fullMirrorDepth",
 				"Flip main INTZ DSV after color flip (1 = on, ReShade MXAO companion)",
 				1, 0, 1, Game::saved);
+			Dvars::r_fullMirror_gateMode = Dvars::Register::Dvar_RegisterInt(
+				"r_fullMirror_gateMode",
+				"r_fullMirror=1 trigger gate: 0=auto(MP v38.2: HUD-gate when r_blur>0), 1=always HUD-gated, 2=always post-DRAW",
+				0, 0, 2, Game::saved);
 			Dvars::r_mirrorViewmodel_rtt = Dvars::Register::Dvar_RegisterInt(
 				"r_mirrorViewmodel_rtt",
 				"Off-screen RTT capture of viewmodel + UV-flipped composite",
