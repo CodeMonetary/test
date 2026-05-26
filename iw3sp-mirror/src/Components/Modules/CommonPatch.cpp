@@ -448,7 +448,7 @@ namespace Components
 				1, 0, 1, Game::saved);
 			Dvars::r_fullMirror_gateMode = Dvars::Register::Dvar_RegisterInt(
 				"r_fullMirror_gateMode",
-				"r_fullMirror=1 trigger gate: 0=auto(MP v38.2: HUD-gate when r_blur>0), 1=always HUD-gated, 2=always post-DRAW",
+				"r_fullMirror=1 trigger gate: 0=auto(HUD-gated, default), 1=always HUD-gated (same as auto), 2=always post-DRAW (v37 path, will ghost during damage)",
 				0, 0, 2, Game::saved);
 			Dvars::r_mirrorInput = Dvars::Register::Dvar_RegisterInt(
 				"r_mirrorInput",

@@ -805,9 +805,18 @@ namespace
 			case D3DRS_ALPHATESTENABLE:
 				if (Value != 0 && g_shadow_ate == 0)
 				{
-					fired = (g_shadow_cull == 1
+					// MP v38.2 signature: cull=1, abe!=0, sb=2
+					// SP campaign signature (derived from dx.log + console
+					// hud-fallback dumps): abe!=0, sb=5 (SrcAlpha), db=6
+					// (InvSrcAlpha).  CULL differs across MP/SP so we don't
+					// require a specific cull value for the SP branch.
+					const bool sig_mp = (g_shadow_cull == 1
 						&& g_shadow_abe != 0
-						&& g_shadow_sb == 2);
+						&& g_shadow_sb  == 2);
+					const bool sig_sp = (g_shadow_abe != 0
+						&& g_shadow_sb == 5
+						&& g_shadow_db == 6);
+					fired = sig_mp || sig_sp;
 
 					// Diagnostic dump: print full RS snapshot on every ATE
 					// rising edge while the post-tonemap window is open and
@@ -1200,9 +1209,15 @@ void OnSetPixelShaderConstantF(IDirect3DDevice9* dev,
 				}
 				else
 				{
-					Game::dvar_s* d_blur = Dvars::Functions::Dvar_FindVar
-						? Dvars::Functions::Dvar_FindVar("r_blur") : nullptr;
-					use_hud_gated = d_blur && d_blur->current.value > 0.0f;
+					// gateMode 0 (auto, default): always HUD-gated in SP.
+					// hud_start_detect now matches the SP-specific signature
+					// (abe!=0, sb=5, db=6, ATE 0->1), so the gated trigger
+					// fires correctly and the EndScene fallback only kicks
+					// in for menu/console frames without a HUD pass.  This
+					// fixes the damage-overlay ghost-layer (which was caused
+					// by the v37 post-DRAW path running before SP post-FX
+					// composites read history textures) without flipping HUD.
+					use_hud_gated = true;
 				}
 
 				if (use_hud_gated)
