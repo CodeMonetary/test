@@ -770,8 +770,9 @@ namespace Components
 	{
 		//Dvars::r_d3d9ex = Dvars::Register::Dvar_RegisterBool("r_d3d9ex","extended d3d9 interface",true,Game::dvar_flags::saved);
 
-		// rtx
-		Dvars::r_d3d9ex = Dvars::Register::Dvar_RegisterBool("r_d3d9ex", "extended d3d9 interface", false, Game::dvar_flags::saved);
+		// mirror-sp: defaulted to true so D3D9 wrapper is installed and Mirror hooks fire on startup.
+		// Without this, dvars register but no hook runs (BeginScene/EndScene/SetXxxShaderConstantF never wrapped).
+		Dvars::r_d3d9ex = Dvars::Register::Dvar_RegisterBool("r_d3d9ex", "extended d3d9 interface", true, Game::dvar_flags::saved);
 
 		Utils::Hook::Set(0x65D368, D3D9Ex::Direct3DCreate9Stub);
 	}

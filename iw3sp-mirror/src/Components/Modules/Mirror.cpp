@@ -810,6 +810,13 @@ namespace
 
 void OnBeginScene(IDirect3DDevice9* /*dev*/)
 {
+	static bool s_announced = false;
+	if (!s_announced)
+	{
+		s_announced = true;
+		engine_print("[mirror] D3D9Ex wrapper active, mirror hooks installed (v38.2 SP port).\n");
+	}
+
 	mirror_rtt::g_final_composite_done_this_frame = false;
 	mirror_rtt::g_dhp_seen_prev_frame = mirror_rtt::g_dhp_seen_this_frame;
 	mirror_rtt::g_dhp_seen_this_frame = false;
