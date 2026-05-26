@@ -786,6 +786,7 @@ namespace
 		// to-HUD-start interval per frame.
 		static bool g_diag_window_open = false;
 		static int  g_diag_ate_rise_seen = 0;
+		static int  g_diag_pscf7_fires_this_frame = 0;
 
 		static bool observe(D3DRENDERSTATETYPE State, DWORD Value)
 		{
@@ -813,7 +814,7 @@ namespace
 					// the user enabled log >= 2.  Limited to first 8 per frame
 					// so we don't flood console.
 					if (g_diag_window_open
-						&& g_diag_ate_rise_seen < 8
+						&& g_diag_ate_rise_seen < 32
 						&& mirror_log_level() >= 2)
 					{
 						++g_diag_ate_rise_seen;
@@ -843,13 +844,51 @@ namespace
 
 		static void open_diag_window()
 		{
-			g_diag_window_open   = true;
-			g_diag_ate_rise_seen = 0;
+			// First open of the frame resets the rise counter.  Subsequent
+			// PSCF c7 fires within the same frame just track the call count
+			// and leave the rise counter intact so we see *all* ATE rises
+			// in the post-tonemap-to-next-BeginScene window.
+			if (!g_diag_window_open)
+			{
+				g_diag_window_open   = true;
+				g_diag_ate_rise_seen = 0;
+			}
+			++g_diag_pscf7_fires_this_frame;
 		}
 
 		static void close_diag_window()
 		{
 			g_diag_window_open = false;
+		}
+
+		static void reset_frame_counters()
+		{
+			g_diag_pscf7_fires_this_frame = 0;
+		}
+
+		static void dump_state_snapshot(const char* tag)
+		{
+			if (mirror_log_level() < 2) return;
+			char buf[256];
+			_snprintf_s(buf, sizeof(buf),
+				"[mirror:%s] cull=%lu abe=%lu sb=%lu db=%lu sba=%lu dba=%lu ate=%lu ze=%lu zw=%lu fill=%lu\n",
+				tag,
+				(unsigned long)g_shadow_cull,
+				(unsigned long)g_shadow_abe,
+				(unsigned long)g_shadow_sb,
+				(unsigned long)g_shadow_db,
+				(unsigned long)g_shadow_sba,
+				(unsigned long)g_shadow_dba,
+				(unsigned long)g_shadow_ate,
+				(unsigned long)g_shadow_ze,
+				(unsigned long)g_shadow_zw,
+				(unsigned long)g_shadow_fill);
+			engine_print(buf);
+		}
+
+		static int pscf7_fires_this_frame()
+		{
+			return g_diag_pscf7_fires_this_frame;
 		}
 	} // namespace hud_start_detect
 
@@ -883,6 +922,7 @@ void OnBeginScene(IDirect3DDevice9* /*dev*/)
 	mirror_rtt::g_inject_calls_this_frame    = 0;
 	mirror_rtt::g_inject_ok_count_this_frame = 0;
 	hud_start_detect::close_diag_window();
+	hud_start_detect::reset_frame_counters();
 	++s_frame_counter;
 }
 
@@ -910,6 +950,10 @@ void OnEndScene(IDirect3DDevice9* dev)
 	// 3) hud-gated fallback (menu/console frame; no HUD draws this frame)
 	if (mirror_rtt::g_pending_fullmirror_flip_hud_gated)
 	{
+		// Diagnostic: dump RS state right before the fallback fires.
+		// This is the state at EndScene -- if HUD drew, this captures
+		// the post-HUD render-state that the engine leaves behind.
+		hud_start_detect::dump_state_snapshot("hud-fallback");
 		mirror_rtt::g_pending_fullmirror_flip_hud_gated = false;
 		if (mirror_rtt::do_fullscreen_flip(dev))
 		{
@@ -937,9 +981,9 @@ void OnEndScene(IDirect3DDevice9* dev)
 	// 5) per-frame log
 	if (mirror_log_level() >= 1 && (s_frame_counter % 60u) == 0u)
 	{
-		char buf[256];
+		char buf[320];
 		_snprintf_s(buf, sizeof(buf),
-			"[mirror] f=%u fm=%d rtt=%d dhp=%d/%d bsg=%d esg=%d inj=%d/%d pass_end=%d\n",
+			"[mirror] f=%u fm=%d rtt=%d dhp=%d/%d bsg=%d esg=%d inj=%d/%d pass_end=%d pscf7=%d\n",
 			s_frame_counter,
 			Dvars::r_fullMirror ? Dvars::r_fullMirror->current.integer : 0,
 			Dvars::r_mirrorViewmodel_rtt ? Dvars::r_mirrorViewmodel_rtt->current.integer : 0,
@@ -949,8 +993,13 @@ void OnEndScene(IDirect3DDevice9* dev)
 			mirror_rtt::g_end_seg_count_this_frame,
 			mirror_rtt::g_inject_ok_count_this_frame,
 			mirror_rtt::g_inject_calls_this_frame,
-			(int)mirror_rtt::g_pass_active);
+			(int)mirror_rtt::g_pass_active,
+			hud_start_detect::pscf7_fires_this_frame());
 		engine_print(buf);
+
+		// Also dump the final state snapshot at EndScene every 60th frame
+		// so we can correlate it with the ate-rise stream above.
+		hud_start_detect::dump_state_snapshot("eos-state");
 	}
 }
 
@@ -1212,6 +1261,44 @@ void RegisterDvars()
 	// Registered in CommonPatch.cpp -- see Dvars.cpp / Dvars.hpp /
 	// CommonPatch.cpp for the actual Dvar_RegisterX calls. Keeping this
 	// stub allows code searches for the helper to land somewhere sane.
+}
+
+// ----------------------------------------------------------------------
+// r_mirrorInput :: input-side mirroring (mouse-X + strafe-X).
+//
+//   Goal: pair the visual r_fullMirror flip with a mirrored control
+//   scheme so input semantics match what the player sees.  Forward,
+//   back, pitch (up/down) and jump are untouched -- only horizontal
+//   axes are negated.
+//
+//   Hooks:
+//     RawMouse::CL_MouseEvent    -> Mirror::OnMouseDelta(&dx, &dy)
+//                                   (called before mouseDx accumulation
+//                                   so engine sees the inverted value)
+//     Gamepad::CL_MouseMove tail -> Mirror::OnUserCmd(cmd)
+//                                   (post-processes the populated
+//                                   usercmd_s right before consumption)
+// ----------------------------------------------------------------------
+void OnMouseDelta(int* dx, int* /*dy*/)
+{
+	if (!dx) return;
+	if (!Dvars::r_mirrorInput) return;
+	if (Dvars::r_mirrorInput->current.integer == 0) return;
+	*dx = -(*dx);
+}
+
+void OnUserCmd(Game::usercmd_s* cmd)
+{
+	if (!cmd) return;
+	if (!Dvars::r_mirrorInput) return;
+	if (Dvars::r_mirrorInput->current.integer == 0) return;
+	// rightmove is signed char (-127..127).  Negation is symmetric in
+	// this range except for the exact value -128 which char cannot
+	// hold; cast through int to be safe and clamp.
+	int v = -(int)cmd->rightmove;
+	if (v >  127) v =  127;
+	if (v < -127) v = -127;
+	cmd->rightmove = (char)v;
 }
 
 } // namespace Mirror

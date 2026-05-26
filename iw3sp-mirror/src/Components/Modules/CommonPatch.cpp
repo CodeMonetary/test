@@ -450,6 +450,10 @@ namespace Components
 				"r_fullMirror_gateMode",
 				"r_fullMirror=1 trigger gate: 0=auto(MP v38.2: HUD-gate when r_blur>0), 1=always HUD-gated, 2=always post-DRAW",
 				0, 0, 2, Game::saved);
+			Dvars::r_mirrorInput = Dvars::Register::Dvar_RegisterInt(
+				"r_mirrorInput",
+				"Mirror horizontal input axes: 0=off, 1=invert mouse-X (yaw) and swap strafe A<->D. Pitch and forward/back unchanged.",
+				0, 0, 1, Game::saved);
 			Dvars::r_mirrorViewmodel_rtt = Dvars::Register::Dvar_RegisterInt(
 				"r_mirrorViewmodel_rtt",
 				"Off-screen RTT capture of viewmodel + UV-flipped composite",

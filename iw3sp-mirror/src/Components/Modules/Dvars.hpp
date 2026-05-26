@@ -60,6 +60,7 @@ namespace Dvars
 	extern Game::dvar_s* r_fullMirror;
 	extern Game::dvar_s* r_fullMirrorDepth;
 	extern Game::dvar_s* r_fullMirror_gateMode;
+	extern Game::dvar_s* r_mirrorInput;
 	extern Game::dvar_s* r_mirrorViewmodel_rtt;
 	extern Game::dvar_s* r_mirrorViewmodel_rttBlend;
 	extern Game::dvar_s* r_mirrorViewmodel_rttTonemapInject;

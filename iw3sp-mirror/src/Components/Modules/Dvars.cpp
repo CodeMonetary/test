@@ -60,6 +60,7 @@ namespace Dvars
 	Game::dvar_s* r_fullMirror = nullptr;
 	Game::dvar_s* r_fullMirrorDepth = nullptr;
 	Game::dvar_s* r_fullMirror_gateMode = nullptr;
+	Game::dvar_s* r_mirrorInput = nullptr;
 	Game::dvar_s* r_mirrorViewmodel_rtt = nullptr;
 	Game::dvar_s* r_mirrorViewmodel_rttBlend = nullptr;
 	Game::dvar_s* r_mirrorViewmodel_rttTonemapInject = nullptr;

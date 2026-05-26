@@ -23,6 +23,8 @@
 
 #include <d3d9.h>
 
+namespace Game { struct usercmd_s; }
+
 namespace Mirror
 {
 	// ----- per-frame hooks -----
@@ -30,6 +32,20 @@ namespace Mirror
 	void OnEndScene(IDirect3DDevice9* dev);
 	void OnReset();
 	void OnPresent();
+
+	// ----- input mirror hooks (r_mirrorInput) -----
+	//   OnMouseDelta : called from RawMouse::CL_MouseEvent BEFORE the
+	//                  delta is accumulated into mouseDx/mouseDy.  When
+	//                  r_mirrorInput == 1, dx is negated in-place so
+	//                  right mouse motion produces left yaw rotation.
+	void OnMouseDelta(int* dx, int* dy);
+	//   OnUserCmd    : called from Gamepad::CL_MouseMove AFTER the
+	//                  engine has populated the usercmd_s for this
+	//                  frame.  When r_mirrorInput == 1, cmd->rightmove
+	//                  is negated so the A/D strafe bindings swap
+	//                  (A walks right, D walks left).  forwardmove,
+	//                  upmove, pitchmove, yawmove are untouched.
+	void OnUserCmd(Game::usercmd_s* cmd);
 
 	// ----- constant-upload hooks -----
 	//   pConstantData     : the values the engine wants to upload.
