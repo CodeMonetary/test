@@ -1,0 +1,83 @@
+name: SP Mirror Build (overlay on xoxor4d/iw3sp-mod-rtx)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - 'devin/sp-mirror-*'
+    paths:
+      - 'iw3sp-mirror/**'
+      - '.github/workflows/build-sp.yml'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build SP game.dll
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        configuration:
+          - Release
+
+    steps:
+      - name: Check out overlay
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+          fetch-depth: 1
+          lfs: false
+
+      - name: Check out xoxor4d/iw3sp-mod-rtx upstream
+        uses: actions/checkout@v4
+        with:
+          repository: xoxor4d/iw3sp-mod-rtx
+          path: upstream
+          submodules: true
+          fetch-depth: 1
+          lfs: false
+
+      - name: Overlay Mirror.cpp/.hpp and modified files onto upstream
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse -Force overlay/iw3sp-mirror/src/* upstream/src/
+          Write-Host "--- overlay contents ---"
+          Get-ChildItem -Recurse overlay/iw3sp-mirror/src | ForEach-Object { Write-Host $_.FullName }
+          Write-Host "--- verifying overlay applied ---"
+          if (!(Test-Path upstream/src/Components/Modules/Mirror.cpp)) { exit 1 }
+          if (!(Test-Path upstream/src/Components/Modules/Mirror.hpp)) { exit 1 }
+          Select-String -Path upstream/src/Components/Modules/D3D9Ex.cpp -Pattern 'Mirror::OnBeginScene' -Quiet
+          Select-String -Path upstream/src/Components/Modules/CommonPatch.cpp -Pattern 'r_fullMirror' -Quiet
+          Select-String -Path upstream/src/Components/Modules/Dvars.hpp -Pattern 'r_fullMirror' -Quiet
+          Select-String -Path upstream/src/Components/Modules/Dvars.cpp -Pattern 'r_fullMirror' -Quiet
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Generate VS2022 project files
+        working-directory: upstream
+        run: tools/premake5 vs2022
+
+      - name: Set up problem matching
+        uses: ammaraskar/msvc-problem-matcher@master
+
+      - name: Build ${{matrix.configuration}} Win32
+        working-directory: upstream
+        run: msbuild /m /v:minimal /p:Configuration=${{matrix.configuration}} /p:Platform=Win32 build/iw3sp_dev.sln
+
+      - name: Stage build outputs
+        working-directory: upstream
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ../out | Out-Null
+          Copy-Item -Force "build/bin/${{matrix.configuration}}/game.dll" ../out/
+          Copy-Item -Force "build/bin/${{matrix.configuration}}/game.pdb" ../out/
+
+      - name: Upload SP build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iw3sp-mirror-${{matrix.configuration}}
+          path: |
+            out/game.dll
+            out/game.pdb
