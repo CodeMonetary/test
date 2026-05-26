@@ -1061,13 +1061,21 @@ void OnSetPixelShaderConstantF(IDirect3DDevice9* dev,
 			const bool is_pre_hud_signal = mirror_rtt::match_tonemap_signal(dev, c70, c71, c72, c73);
 			if (is_pre_hud_signal)
 			{
-				Game::dvar_s* d_blur = Dvars::Functions::Dvar_FindVar
-					? Dvars::Functions::Dvar_FindVar("r_blur") : nullptr;
-				const bool blur_on = d_blur && d_blur->current.value > 0.0f;
-				if (blur_on)
-					mirror_rtt::g_pending_fullmirror_flip_hud_gated = true;
-				else
-					mirror_rtt::g_pending_fullmirror_flip = true;
+				// SP campaign triggers extra post-FX composites during damage
+				// (hurt overlay, low-health screen tint, hit-direction blur,
+				// damage-cam shake) that sit between the tonemap pass and the
+				// HUD pass -- same shape as the v38 r_blur ghost-layer bug,
+				// but without raising the r_blur dvar.  v38.2 only gated on
+				// r_blur > 0 so the SP damage-triggered composites slipped
+				// through the post-DRAW path and produced the un-mirrored
+				// flicker over the gun whenever the player took damage.
+				//
+				// In SP we always route through the HUD-gated path; the
+				// 4-state HUD-start signature is the reliable end-of-post-FX
+				// boundary regardless of which optional layers are active.
+				// EndScene fallback still covers menu/console frames where
+				// HUD never starts.
+				mirror_rtt::g_pending_fullmirror_flip_hud_gated = true;
 			}
 		}
 	}
