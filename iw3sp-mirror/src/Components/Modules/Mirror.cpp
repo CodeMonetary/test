@@ -788,6 +788,18 @@ namespace
 		static int  g_diag_ate_rise_seen = 0;
 		static int  g_diag_pscf7_fires_this_frame = 0;
 
+		// SP HUD-start detector (non-ATE-rising-edge):
+		//   In SP gameplay, ATE stays =1 from post-FX composites, so the MP
+		//   v38.2 ATE-rising-edge signature never fires during HUD.  The
+		//   actual HUD-start marker in SP is the *blend-state combo*
+		//   (ABE=1, SB=5=SRCALPHA, DB=6=INVSRCALPHA) becoming true for the
+		//   first time after the tonemap PSCF c7 fingerprint, since post-FX
+		//   in SP uses other blend pairs (sb=10/db=2 or sb=2/db=6) and never
+		//   sets SB=5 together with DB=6.
+		static bool g_sp_hud_combo_active = false;
+		static bool g_sp_hud_started_this_frame = false;
+		static int  g_draws_since_tonemap = 0;
+
 		static bool observe(D3DRENDERSTATETYPE State, DWORD Value)
 		{
 			bool fired = false;
@@ -805,18 +817,12 @@ namespace
 			case D3DRS_ALPHATESTENABLE:
 				if (Value != 0 && g_shadow_ate == 0)
 				{
-					// MP v38.2 signature: cull=1, abe!=0, sb=2
-					// SP campaign signature (derived from dx.log + console
-					// hud-fallback dumps): abe!=0, sb=5 (SrcAlpha), db=6
-					// (InvSrcAlpha).  CULL differs across MP/SP so we don't
-					// require a specific cull value for the SP branch.
+					// MP v38.2 signature (preserved for MP-style installs):
+					//   cull=1, abe!=0, sb=2, ATE 0->1.
 					const bool sig_mp = (g_shadow_cull == 1
 						&& g_shadow_abe != 0
 						&& g_shadow_sb  == 2);
-					const bool sig_sp = (g_shadow_abe != 0
-						&& g_shadow_sb == 5
-						&& g_shadow_db == 6);
-					fired = sig_mp || sig_sp;
+					fired = sig_mp;
 
 					// Diagnostic dump: print full RS snapshot on every ATE
 					// rising edge while the post-tonemap window is open and
@@ -848,19 +854,69 @@ namespace
 				break;
 			default: break;
 			}
+
+			// SP HUD-start detector: fire the FIRST time after tonemap that
+			// the blend combo (ABE!=0, SB=5, DB=6) becomes true.  Re-evaluated
+			// on every relevant state change.  Guarded by
+			// g_sp_hud_started_this_frame so we only fire once per frame.
+			if (!fired
+				&& g_diag_window_open
+				&& !g_sp_hud_started_this_frame
+				&& (State == D3DRS_ALPHABLENDENABLE
+					|| State == D3DRS_SRCBLEND
+					|| State == D3DRS_DESTBLEND))
+			{
+				const bool combo_now = (g_shadow_abe != 0
+					&& g_shadow_sb == 5
+					&& g_shadow_db == 6);
+				if (combo_now && !g_sp_hud_combo_active)
+				{
+					g_sp_hud_started_this_frame = true;
+					fired = true;
+					if (mirror_log_level() >= 2)
+					{
+						char buf[192];
+						_snprintf_s(buf, sizeof(buf),
+							"[mirror:hud-start-sp] combo (abe=%lu sb=%lu db=%lu) cull=%lu ate=%lu draws_since_tonemap=%d\n",
+							(unsigned long)g_shadow_abe,
+							(unsigned long)g_shadow_sb,
+							(unsigned long)g_shadow_db,
+							(unsigned long)g_shadow_cull,
+							(unsigned long)g_shadow_ate,
+							g_draws_since_tonemap);
+						engine_print(buf);
+					}
+				}
+				g_sp_hud_combo_active = combo_now;
+			}
+
 			return fired;
+		}
+
+		static void note_draw_after_tonemap()
+		{
+			if (g_diag_window_open) ++g_draws_since_tonemap;
 		}
 
 		static void open_diag_window()
 		{
-			// First open of the frame resets the rise counter.  Subsequent
-			// PSCF c7 fires within the same frame just track the call count
-			// and leave the rise counter intact so we see *all* ATE rises
-			// in the post-tonemap-to-next-BeginScene window.
+			// First open of the frame resets the rise counter and draw
+			// counter.  Subsequent PSCF c7 fires within the same frame just
+			// track the call count and leave the rise counter intact so we
+			// see *all* ATE rises in the post-tonemap-to-next-BeginScene
+			// window.
 			if (!g_diag_window_open)
 			{
-				g_diag_window_open   = true;
-				g_diag_ate_rise_seen = 0;
+				g_diag_window_open    = true;
+				g_diag_ate_rise_seen  = 0;
+				g_draws_since_tonemap = 0;
+				// Seed the SP-HUD combo with the CURRENT shadow state so
+				// we only fire on an actual transition into the HUD blend
+				// combo within this window, not on stale state inherited
+				// from a previous frame's HUD pass.
+				g_sp_hud_combo_active = (g_shadow_abe != 0
+					&& g_shadow_sb == 5
+					&& g_shadow_db == 6);
 			}
 			++g_diag_pscf7_fires_this_frame;
 		}
@@ -873,6 +929,9 @@ namespace
 		static void reset_frame_counters()
 		{
 			g_diag_pscf7_fires_this_frame = 0;
+			g_sp_hud_combo_active         = false;
+			g_sp_hud_started_this_frame   = false;
+			g_draws_since_tonemap         = 0;
 		}
 
 		static void dump_state_snapshot(const char* tag)
